@@ -112,7 +112,8 @@ def analyze_stock(ticker):
             "Verdict": data.get("verdict"),
             "Détails": data.get("analysis_points")
         }
-    except Exception:
+except Exception as e:
+        st.error(f"🚨 ERREUR sur {ticker} : {e}")
         return None
 
 # --- 3. INTERFACE ---
