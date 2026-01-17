@@ -5,6 +5,7 @@ import yfinance as yf
 from openai import OpenAI
 import json
 import pandas as pd
+import random
 
 # --- 1. CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="AI Strategic Hunter")
@@ -40,105 +41,109 @@ if not check_password():
 
 # --- INIT API ---
 api_key = os.getenv("OPENAI_API_KEY")
-if not api_key:
-    st.error("🚨 Clé API manquante !")
-    st.stop()
-
-client = OpenAI(api_key=api_key)
+client = OpenAI(api_key=api_key) if api_key else None
 
 # --- 2. FONCTIONS ---
 @st.cache_data(ttl=3600)
 def analyze_stock(ticker):
+    # Initialisation des variables
+    ticker = ticker.strip().upper()
+    stock = yf.Ticker(ticker)
+    
+    # --- A. RÉCUPÉRATION DONNÉES (Yahoo) ---
     try:
-        ticker = ticker.strip().upper()
-        stock = yf.Ticker(ticker)
-        
-        # Récupération Historique
-        try:
-            hist = stock.history(period="6mo")
-        except:
-            hist = pd.DataFrame()
-
+        hist = stock.history(period="6mo")
         info = stock.info
-        current_price = info.get('currentPrice') or info.get('regularMarketPrice')
         
-        # Secours si le prix n'est pas dans 'info'
+        # Prix actuel
+        current_price = info.get('currentPrice') or info.get('regularMarketPrice')
         if not current_price and not hist.empty:
             current_price = hist['Close'].iloc[-1]
             
         if not current_price:
-            st.warning(f"⚠️ Prix introuvable pour {ticker}")
-            return None
+            return {"Error": f"Prix introuvable pour {ticker}"}
 
-        # Infos financières
-        pe = info.get('trailingPE', "N/A")
-        
-        # News (On limite à 1 pour économiser)
-        news = stock.news[:1] if stock.news else []
-        news_txt = news[0].get('title','') if news else "Pas de news récente"
-
-        # Prompt optimisé pour GPT-3.5
-        prompt = f"""
-        Analyse l'action {ticker} (${current_price}). PE Ratio: {pe}.
-        Dernière news: {news_txt}
-        Business: {info.get('longBusinessSummary','')[:300]}
-        
-        Agis comme un analyste financier senior.
-        
-        Réponds UNIQUEMENT en JSON avec ce format exact :
-        {{
-            "category": "Catégorie (IA Infra, Robotique, Software, Legacy, Autre)",
-            "timing_score": 50 (Score entre 0 et 100),
-            "verdict": "Avis court (Haussier/Baissier/Neutre)",
-            "analysis_points": "3 points clés résumés avec des tirets"
-        }}
-        """
-
-        # --- LE CHANGEMENT MAGIQUE EST ICI ---
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",  # <--- Le modèle fiable
-            messages=[{"role": "user", "content": prompt}],
-            # GPT-3.5 a parfois du mal avec le mode JSON strict, on le guide via le prompt
-        )
-        
-        # Nettoyage de la réponse (au cas où GPT-3.5 bavarde un peu autour du JSON)
-        content = response.choices[0].message.content
-        # On cherche le début et la fin du JSON
-        start = content.find('{')
-        end = content.rfind('}') + 1
-        if start != -1 and end != -1:
-            json_str = content[start:end]
-            data = json.loads(json_str)
-        else:
-            # Fallback si le JSON échoue
-            data = {
-                "category": "Inconnu",
-                "timing_score": 50,
-                "verdict": "Erreur format",
-                "analysis_points": content[:100]
-            }
-        
-        return {
-            "Ticker": ticker,
-            "Prix": current_price,
-            "History": hist['Close'] if not hist.empty else None,
-            "Catégorie": data.get("category", "Autre"),
-            "Timing": data.get("timing_score", 50),
-            "Verdict": data.get("verdict", "N/A"),
-            "Détails": data.get("analysis_points", "Pas de détails")
-        }
+        # Calcul simple de tendance (Maths pures)
+        start_price = hist['Close'].iloc[0] if not hist.empty else current_price
+        variation = ((current_price - start_price) / start_price) * 100
+        is_bullish = variation > 0
 
     except Exception as e:
-        st.error(f"Erreur sur {ticker}: {e}")
-        return None
+        return {"Error": f"Erreur Yahoo: {e}"}
+
+    # --- B. TENTATIVE IA (Prompt Ultra-Léger) ---
+    ai_data = None
+    ai_error = None
+    
+    if client:
+        try:
+            # Prompt minimaliste pour économiser les tokens
+            prompt = f"""
+            Action: {ticker}. Secteur: {info.get('sector','Tech')}.
+            Analyse JSON stricte:
+            {{
+                "category": "Catégorie (1 mot)",
+                "verdict": "Verdict (1 phrase)",
+                "details": "3 points clés"
+            }}
+            """
+            
+            response = client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=150 # On coupe la parole si c'est trop long
+            )
+            content = response.choices[0].message.content
+            # Extraction JSON artisanale
+            if "{" in content and "}" in content:
+                json_str = content[content.find('{'):content.rfind('}')+1]
+                ai_data = json.loads(json_str)
+                
+        except Exception as e:
+            ai_error = str(e) # On note l'erreur mais on ne plante pas !
+
+    # --- C. CONSTRUCTION DU RÉSULTAT (Hybride) ---
+    
+    # Si l'IA a marché, on prend ses données
+    if ai_data:
+        category = ai_data.get("category", "Tech")
+        verdict = ai_data.get("verdict", "Analyse IA complétée")
+        details = ai_data.get("details", "- Analyse fondamentale OK")
+        timing = 85 if is_bullish else 30
+        source = "✅ Analyse IA (GPT-3.5)"
+        
+    # SINON : On génère une analyse technique automatique (Mode Secours)
+    else:
+        category = info.get('sector', 'Technologie')
+        trend_str = "Haussière" if is_bullish else "Baissière"
+        verdict = f"Tendance {trend_str} de {variation:.1f}% sur 6 mois."
+        details = f"""
+        - ⚠️ Mode Secours (Quota OpenAI dépassé ou Erreur)
+        - Prix actuel : {current_price:.2f} $
+        - Performance 6 mois : {variation:.2f} %
+        - L'analyse fondamentale IA est temporairement indisponible.
+        """
+        timing = int(min(max(50 + variation, 0), 100)) # Score basé sur la perf
+        source = "⚠️ Analyse Technique (Mode Secours)"
+
+    return {
+        "Ticker": ticker,
+        "Prix": current_price,
+        "History": hist['Close'] if not hist.empty else None,
+        "Catégorie": category,
+        "Timing": timing,
+        "Verdict": verdict,
+        "Détails": details,
+        "Source": source
+    }
 
 # --- 3. INTERFACE ---
 st.title("🤖 AI Strategic Hunter")
-st.caption("Version Stable • Powered by GPT-3.5 Turbo")
+st.caption("Version Indestructible • Fallback Auto")
 
 with st.sidebar:
     st.header("Portefeuille")
-    raw_text = st.text_area("Tickers", "NVDA PLTR") 
+    raw_text = st.text_area("Tickers", "NVDA") 
     tickers = [t.strip() for t in raw_text.replace(',',' ').split() if t.strip()]
     launch = st.button("🚀 Analyser")
 
@@ -146,21 +151,24 @@ if launch and tickers:
     for t in tickers:
         with st.spinner(f"Analyse de {t}..."):
             data = analyze_stock(t)
-            time.sleep(1) # Petite pause de sécurité
+            time.sleep(0.5)
             
-        if data:
+        if data and "Error" not in data:
             with st.container(border=True):
                 c1, c2, c3 = st.columns([1, 2, 1])
                 with c1:
                     st.metric(label=data['Ticker'], value=f"{data['Prix']:.2f} $")
-                    st.badge(data['Catégorie'])
+                    st.caption(data['Source']) # Affiche si c'est GPT ou Secours
                 with c2:
                     if data['History'] is not None:
                         st.line_chart(data['History'], height=80)
                 with c3:
-                    score = int(data.get('Timing', 50))
-                    st.progress(score/100, text=f"Timing: {score}/100")
+                    score = data.get('Timing', 50)
+                    color = "off" if score > 70 else "normal"
+                    st.progress(score/100, text=f"Score: {score}/100")
                     st.write(f"**{data['Verdict']}**")
                 
                 with st.expander(f"Détails {data['Ticker']}"):
                     st.markdown(data['Détails'])
+        elif data:
+             st.error(data["Error"])
