@@ -9,14 +9,13 @@ from io import BytesIO
 # --- 1. CONFIGURATION & SÉCURITÉ ---
 st.set_page_config(layout="wide", page_title="AI Strategic Hunter")
 
-# Gestion des secrets (Fonctionne en Local .env ET en Ligne)
+# Gestion des secrets
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except:
     pass
 
-# --- 🔒 PROTECTION DU SITE (Anti-Faillite) ---
 def check_password():
     """Demande un mot de passe avant d'afficher l'app."""
     if "password_correct" not in st.session_state:
@@ -28,9 +27,11 @@ def check_password():
     st.markdown("### 🔒 Accès Restreint")
     pwd = st.text_input("Mot de passe d'accès :", type="password")
     
-    # DÉFINISSEZ VOTRE MOT DE PASSE ICI (ex: "admin123")
+    # Mot de passe par défaut "admin123" si pas de fichier .env
+    env_pwd = os.getenv("APP_PASSWORD", "admin123")
+    
     if st.button("Valider"):
-        if pwd == os.getenv("APP_PASSWORD", "admin123"): # Par défaut "admin123" si pas configuré
+        if pwd == env_pwd:
             st.session_state.password_correct = True
             st.rerun()
         else:
@@ -38,12 +39,12 @@ def check_password():
     return False
 
 if not check_password():
-    st.stop() # Arrête tout si pas connecté
+    st.stop()
 
 # --- INIT API ---
 api_key = os.getenv("OPENAI_API_KEY")
 if not api_key:
-    st.error("Clé API manquante dans les secrets.")
+    st.error("🚨 Clé API manquante ! Vérifiez les Secrets Streamlit.")
     st.stop()
 
 client = OpenAI(api_key=api_key)
@@ -51,22 +52,29 @@ client = OpenAI(api_key=api_key)
 # --- 2. FONCTIONS ---
 @st.cache_data(ttl=3600)
 def analyze_stock(ticker):
+    # Tout le bloc est dans un TRY pour attraper les erreurs
     try:
         ticker = ticker.strip().upper()
         stock = yf.Ticker(ticker)
         
-        # Historique pour le graphique
+        # Historique
         try:
             hist = stock.history(period="6mo")
         except:
             hist = pd.DataFrame()
 
         info = stock.info
-        current_price = info.get('currentPrice') or info.get('regularMarketPrice') or (hist['Close'].iloc[-1] if not hist.empty else 0)
         
-        if not current_price: return None
+        # Récupération du prix (plusieurs tentatives)
+        current_price = info.get('currentPrice') or info.get('regularMarketPrice')
+        if not current_price and not hist.empty:
+            current_price = hist['Close'].iloc[-1]
+            
+        if not current_price:
+            st.warning(f"⚠️ Prix introuvable pour {ticker}")
+            return None
 
-        # Data
+        # Données
         pe = info.get('trailingPE', "N/A")
         peg = info.get('pegRatio', "N/A")
         
@@ -74,7 +82,7 @@ def analyze_stock(ticker):
         news = stock.news[:2] if stock.news else []
         news_txt = "\n".join([n.get('title','') for n in news])
 
-        # Prompt
+        # Prompt GPT
         prompt = f"""
         Analyse {ticker} (${current_price}).
         PE: {pe}, PEG: {peg}.
@@ -85,14 +93,14 @@ def analyze_stock(ticker):
         1. Catégorie (Infra, Robots, Agents, Legacy, Autre).
         2. Score Timing (0-100).
         3. Verdict (1 phrase courte).
-        4. Analyse (3 points clés bullet points).
+        4. Analyse (3 points clés avec tirets).
         
         JSON strict:
         {{
             "category": "String",
             "timing_score": Int,
             "verdict": "String",
-            "analysis_points": "String (avec tirets)"
+            "analysis_points": "String"
         }}
         """
 
@@ -106,51 +114,49 @@ def analyze_stock(ticker):
         return {
             "Ticker": ticker,
             "Prix": current_price,
-            "History": hist['Close'] if not hist.empty else None, # On garde la courbe !
+            "History": hist['Close'] if not hist.empty else None,
             "Catégorie": data.get("category"),
             "Timing": data.get("timing_score"),
             "Verdict": data.get("verdict"),
             "Détails": data.get("analysis_points")
         }
-except Exception as e:
+
+    # C'EST ICI QUE VOUS AVIEZ L'ERREUR D'INDENTATION
+    except Exception as e:
         st.error(f"🚨 ERREUR sur {ticker} : {e}")
         return None
 
 # --- 3. INTERFACE ---
-st.title("🤖 AI Strategic Hunter")
-st.caption("Protected Access • Powered by GPT-4o & Yahoo Finance")
+st.title("🤖 AI Strategic Hunter (Debug Mode)")
+st.caption("Protected Access • Powered by GPT-4o")
 
 with st.sidebar:
     st.header("Portefeuille")
     raw_text = st.text_area("Tickers (ex: NVDA TSLA)", "NVDA PLTR")
+    st.caption("💡 Astuce : Validez avec Ctrl+Entrée avant de lancer.")
+    
+    # Nettoyage de la liste
     tickers = [t.strip() for t in raw_text.replace(',',' ').split() if t.strip()]
+    
     launch = st.button("🚀 Analyser", type="primary")
 
 if launch and tickers:
     for t in tickers:
-        with st.spinner(f"Analyse de {t}..."):
+        with st.spinner(f"Analyse de {t} en cours..."):
             data = analyze_stock(t)
             
         if data:
-            # --- DESIGN CARTE ---
             with st.container(border=True):
                 c1, c2, c3 = st.columns([1, 2, 1])
-                
                 with c1:
                     st.metric(label=data['Ticker'], value=f"{data['Prix']:.2f} $")
                     st.badge(data['Catégorie'])
-                
                 with c2:
-                    # Le Graphique Sparkline !
                     if data['History'] is not None:
                         st.line_chart(data['History'], height=80)
-                
                 with c3:
-                    color = "normal"
-                    if data['Timing'] > 80: color = "off" # Vert (astuce d'affichage)
                     st.progress(data['Timing']/100, text=f"Timing: {data['Timing']}/100")
                     st.write(f"**{data['Verdict']}**")
                 
-                # Le détail dépliable
-                with st.expander(f"🧐 Voir l'analyse détaillée de {data['Ticker']}"):
+                with st.expander(f"🧐 Voir l'analyse de {data['Ticker']}"):
                     st.markdown(data['Détails'])
