@@ -1,15 +1,15 @@
 import streamlit as st
 import os
+import time  # <--- Le ralentisseur pour éviter le blocage OpenAI
 import yfinance as yf
 from openai import OpenAI
 import json
 import pandas as pd
-from io import BytesIO
 
 # --- 1. CONFIGURATION & SÉCURITÉ ---
 st.set_page_config(layout="wide", page_title="AI Strategic Hunter")
 
-# Gestion des secrets
+# Gestion des secrets (Local et Cloud)
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -27,7 +27,7 @@ def check_password():
     st.markdown("### 🔒 Accès Restreint")
     pwd = st.text_input("Mot de passe d'accès :", type="password")
     
-    # Mot de passe par défaut "admin123" si pas de fichier .env
+    # Récupère le mdp du fichier .env ou des Secrets Streamlit (sinon "admin123")
     env_pwd = os.getenv("APP_PASSWORD", "admin123")
     
     if st.button("Valider"):
@@ -52,12 +52,11 @@ client = OpenAI(api_key=api_key)
 # --- 2. FONCTIONS ---
 @st.cache_data(ttl=3600)
 def analyze_stock(ticker):
-    # Tout le bloc est dans un TRY pour attraper les erreurs
     try:
         ticker = ticker.strip().upper()
         stock = yf.Ticker(ticker)
         
-        # Historique
+        # Historique (pour le graph)
         try:
             hist = stock.history(period="6mo")
         except:
@@ -121,13 +120,12 @@ def analyze_stock(ticker):
             "Détails": data.get("analysis_points")
         }
 
-    # C'EST ICI QUE VOUS AVIEZ L'ERREUR D'INDENTATION
     except Exception as e:
         st.error(f"🚨 ERREUR sur {ticker} : {e}")
         return None
 
 # --- 3. INTERFACE ---
-st.title("🤖 AI Strategic Hunter (Debug Mode)")
+st.title("🤖 AI Strategic Hunter")
 st.caption("Protected Access • Powered by GPT-4o")
 
 with st.sidebar:
@@ -135,15 +133,16 @@ with st.sidebar:
     raw_text = st.text_area("Tickers (ex: NVDA TSLA)", "NVDA PLTR")
     st.caption("💡 Astuce : Validez avec Ctrl+Entrée avant de lancer.")
     
-    # Nettoyage de la liste
     tickers = [t.strip() for t in raw_text.replace(',',' ').split() if t.strip()]
-    
     launch = st.button("🚀 Analyser", type="primary")
 
 if launch and tickers:
     for t in tickers:
         with st.spinner(f"Analyse de {t} en cours..."):
             data = analyze_stock(t)
+            
+            # --- LE FREIN À MAIN (Anti-Erreur 429) ---
+            time.sleep(2)  # Pause de 2 secondes entre chaque appel
             
         if data:
             with st.container(border=True):
@@ -155,7 +154,8 @@ if launch and tickers:
                     if data['History'] is not None:
                         st.line_chart(data['History'], height=80)
                 with c3:
-                    st.progress(data['Timing']/100, text=f"Timing: {data['Timing']}/100")
+                    score = data.get('Timing', 0)
+                    st.progress(score/100, text=f"Timing: {score}/100")
                     st.write(f"**{data['Verdict']}**")
                 
                 with st.expander(f"🧐 Voir l'analyse de {data['Ticker']}"):
