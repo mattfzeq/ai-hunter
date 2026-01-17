@@ -6,6 +6,7 @@ from openai import OpenAI
 import json
 import pandas as pd
 import random
+import datetime
 
 # --- 1. CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="AI Strategic Hunter")
@@ -43,107 +44,107 @@ if not check_password():
 api_key = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=api_key) if api_key else None
 
-# --- 2. FONCTIONS ---
+# --- 2. FONCTIONS DE SECOURS (MOCK DATA) ---
+def get_mock_data(ticker):
+    """Génère de fausses données réalistes si Yahoo bloque"""
+    # Prix aléatoire entre 100 et 500
+    base_price = random.uniform(100, 500)
+    
+    # Création d'une fausse courbe historique (Random Walk)
+    dates = pd.date_range(end=datetime.datetime.today(), periods=30)
+    prices = [base_price]
+    for _ in range(29):
+        change = random.uniform(-5, 5) # Variation entre -5 et +5 $
+        prices.append(max(prices[-1] + change, 10)) # On évite le prix négatif
+    
+    hist = pd.Series(prices, index=dates, name="Close")
+    
+    return {
+        "Ticker": ticker,
+        "Prix": prices[-1],
+        "History": hist,
+        "Catégorie": "Simulé (Demo)",
+        "Timing": random.randint(40, 90),
+        "Verdict": "Analyse Démo (Yahoo Bloqué)",
+        "Détails": f"""
+        - ⚠️ **Yahoo Finance ne répond pas** (Rate Limit).
+        - Données simulées pour la démonstration.
+        - Prix fictif : {prices[-1]:.2f} $
+        - L'interface reste fonctionnelle pour test.
+        """,
+        "Source": "⚠️ Mode Démo (Yahoo Sature)"
+    }
+
+# --- 3. FONCTION PRINCIPALE ---
 @st.cache_data(ttl=3600)
 def analyze_stock(ticker):
-    # Initialisation des variables
     ticker = ticker.strip().upper()
-    stock = yf.Ticker(ticker)
     
-    # --- A. RÉCUPÉRATION DONNÉES (Yahoo) ---
+    # 1. TENTATIVE YAHOO (VRAIES DONNÉES)
     try:
+        stock = yf.Ticker(ticker)
         hist = stock.history(period="6mo")
         info = stock.info
         
-        # Prix actuel
-        current_price = info.get('currentPrice') or info.get('regularMarketPrice')
-        if not current_price and not hist.empty:
-            current_price = hist['Close'].iloc[-1]
+        # Si Yahoo renvoie un dictionnaire vide ou pas de prix -> Erreur
+        if hist.empty or not info:
+            raise Exception("Données Yahoo vides")
             
-        if not current_price:
-            return {"Error": f"Prix introuvable pour {ticker}"}
-
-        # Calcul simple de tendance (Maths pures)
-        start_price = hist['Close'].iloc[0] if not hist.empty else current_price
-        variation = ((current_price - start_price) / start_price) * 100
-        is_bullish = variation > 0
-
-    except Exception as e:
-        return {"Error": f"Erreur Yahoo: {e}"}
-
-    # --- B. TENTATIVE IA (Prompt Ultra-Léger) ---
-    ai_data = None
-    ai_error = None
-    
-    if client:
+        current_price = info.get('currentPrice') or info.get('regularMarketPrice') or hist['Close'].iloc[-1]
+        
+        # Si on arrive ici, Yahoo marche ! On tente OpenAI.
         try:
-            # Prompt minimaliste pour économiser les tokens
-            prompt = f"""
-            Action: {ticker}. Secteur: {info.get('sector','Tech')}.
-            Analyse JSON stricte:
-            {{
-                "category": "Catégorie (1 mot)",
-                "verdict": "Verdict (1 phrase)",
-                "details": "3 points clés"
-            }}
-            """
+            if not client: raise Exception("Pas de clé OpenAI")
+            
+            prompt = f"Action {ticker}, Prix {current_price}. Secteur {info.get('sector')}. Analyse en JSON (category, verdict, details)."
             
             response = client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=150 # On coupe la parole si c'est trop long
+                max_tokens=150
             )
             content = response.choices[0].message.content
-            # Extraction JSON artisanale
-            if "{" in content and "}" in content:
-                json_str = content[content.find('{'):content.rfind('}')+1]
-                ai_data = json.loads(json_str)
-                
-        except Exception as e:
-            ai_error = str(e) # On note l'erreur mais on ne plante pas !
+            # Extraction JSON simple
+            start = content.find('{')
+            end = content.rfind('}') + 1
+            ai_data = json.loads(content[start:end])
+            
+            return {
+                "Ticker": ticker,
+                "Prix": current_price,
+                "History": hist['Close'],
+                "Catégorie": ai_data.get("category", "Tech"),
+                "Timing": 75, # Score par défaut si API simple
+                "Verdict": ai_data.get("verdict", "Analyse OK"),
+                "Détails": ai_data.get("details", "- Analyse fondamentale OK"),
+                "Source": "✅ Données Réelles"
+            }
+            
+        except Exception:
+            # Yahoo marche mais pas OpenAI -> Fallback Technique
+            return {
+                "Ticker": ticker,
+                "Prix": current_price,
+                "History": hist['Close'],
+                "Catégorie": info.get('sector', 'Autre'),
+                "Timing": 50,
+                "Verdict": "Données Yahoo OK (Sans IA)",
+                "Détails": "- OpenAI indisponible\n- Prix réel récupéré",
+                "Source": "⚠️ Yahoo Seul (Pas d'IA)"
+            }
 
-    # --- C. CONSTRUCTION DU RÉSULTAT (Hybride) ---
-    
-    # Si l'IA a marché, on prend ses données
-    if ai_data:
-        category = ai_data.get("category", "Tech")
-        verdict = ai_data.get("verdict", "Analyse IA complétée")
-        details = ai_data.get("details", "- Analyse fondamentale OK")
-        timing = 85 if is_bullish else 30
-        source = "✅ Analyse IA (GPT-3.5)"
-        
-    # SINON : On génère une analyse technique automatique (Mode Secours)
-    else:
-        category = info.get('sector', 'Technologie')
-        trend_str = "Haussière" if is_bullish else "Baissière"
-        verdict = f"Tendance {trend_str} de {variation:.1f}% sur 6 mois."
-        details = f"""
-        - ⚠️ Mode Secours (Quota OpenAI dépassé ou Erreur)
-        - Prix actuel : {current_price:.2f} $
-        - Performance 6 mois : {variation:.2f} %
-        - L'analyse fondamentale IA est temporairement indisponible.
-        """
-        timing = int(min(max(50 + variation, 0), 100)) # Score basé sur la perf
-        source = "⚠️ Analyse Technique (Mode Secours)"
+    except Exception as e:
+        # 2. SI TOUT PLANTE -> MODE DÉMO
+        # On ne veut pas que le site crashe, on veut montrer l'UI.
+        return get_mock_data(ticker)
 
-    return {
-        "Ticker": ticker,
-        "Prix": current_price,
-        "History": hist['Close'] if not hist.empty else None,
-        "Catégorie": category,
-        "Timing": timing,
-        "Verdict": verdict,
-        "Détails": details,
-        "Source": source
-    }
-
-# --- 3. INTERFACE ---
+# --- 4. INTERFACE ---
 st.title("🤖 AI Strategic Hunter")
-st.caption("Version Indestructible • Fallback Auto")
+st.caption("Version Portfolio • Auto-Switch Demo Mode")
 
 with st.sidebar:
     st.header("Portefeuille")
-    raw_text = st.text_area("Tickers", "NVDA") 
+    raw_text = st.text_area("Tickers", "NVDA PLTR") 
     tickers = [t.strip() for t in raw_text.replace(',',' ').split() if t.strip()]
     launch = st.button("🚀 Analyser")
 
@@ -151,24 +152,26 @@ if launch and tickers:
     for t in tickers:
         with st.spinner(f"Analyse de {t}..."):
             data = analyze_stock(t)
-            time.sleep(0.5)
+            time.sleep(0.5) # Petite pause pour l'effet visuel
             
-        if data and "Error" not in data:
+        if data:
             with st.container(border=True):
                 c1, c2, c3 = st.columns([1, 2, 1])
                 with c1:
                     st.metric(label=data['Ticker'], value=f"{data['Prix']:.2f} $")
-                    st.caption(data['Source']) # Affiche si c'est GPT ou Secours
+                    # Badge de couleur selon la source
+                    if "Réelles" in data['Source']:
+                        st.success(data['Source'])
+                    else:
+                        st.warning(data['Source'])
+                        
                 with c2:
                     if data['History'] is not None:
                         st.line_chart(data['History'], height=80)
                 with c3:
                     score = data.get('Timing', 50)
-                    color = "off" if score > 70 else "normal"
                     st.progress(score/100, text=f"Score: {score}/100")
                     st.write(f"**{data['Verdict']}**")
                 
                 with st.expander(f"Détails {data['Ticker']}"):
                     st.markdown(data['Détails'])
-        elif data:
-             st.error(data["Error"])
