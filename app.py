@@ -1,15 +1,14 @@
 import streamlit as st
 import os
-import time  # <--- Le ralentisseur pour éviter le blocage OpenAI
+import time
 import yfinance as yf
 from openai import OpenAI
 import json
 import pandas as pd
 
-# --- 1. CONFIGURATION & SÉCURITÉ ---
+# --- 1. CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="AI Strategic Hunter")
 
-# Gestion des secrets (Local et Cloud)
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -17,7 +16,6 @@ except:
     pass
 
 def check_password():
-    """Demande un mot de passe avant d'afficher l'app."""
     if "password_correct" not in st.session_state:
         st.session_state.password_correct = False
 
@@ -26,8 +24,6 @@ def check_password():
 
     st.markdown("### 🔒 Accès Restreint")
     pwd = st.text_input("Mot de passe d'accès :", type="password")
-    
-    # Récupère le mdp du fichier .env ou des Secrets Streamlit (sinon "admin123")
     env_pwd = os.getenv("APP_PASSWORD", "admin123")
     
     if st.button("Valider"):
@@ -44,7 +40,7 @@ if not check_password():
 # --- INIT API ---
 api_key = os.getenv("OPENAI_API_KEY")
 if not api_key:
-    st.error("🚨 Clé API manquante ! Vérifiez les Secrets Streamlit.")
+    st.error("🚨 Clé API manquante !")
     st.stop()
 
 client = OpenAI(api_key=api_key)
@@ -56,15 +52,12 @@ def analyze_stock(ticker):
         ticker = ticker.strip().upper()
         stock = yf.Ticker(ticker)
         
-        # Historique (pour le graph)
         try:
             hist = stock.history(period="6mo")
         except:
             hist = pd.DataFrame()
 
         info = stock.info
-        
-        # Récupération du prix (plusieurs tentatives)
         current_price = info.get('currentPrice') or info.get('regularMarketPrice')
         if not current_price and not hist.empty:
             current_price = hist['Close'].iloc[-1]
@@ -73,15 +66,12 @@ def analyze_stock(ticker):
             st.warning(f"⚠️ Prix introuvable pour {ticker}")
             return None
 
-        # Données
         pe = info.get('trailingPE', "N/A")
         peg = info.get('pegRatio', "N/A")
         
-        # News
         news = stock.news[:2] if stock.news else []
         news_txt = "\n".join([n.get('title','') for n in news])
 
-        # Prompt GPT
         prompt = f"""
         Analyse {ticker} (${current_price}).
         PE: {pe}, PEG: {peg}.
@@ -103,8 +93,9 @@ def analyze_stock(ticker):
         }}
         """
 
+        # --- LE CHANGEMENT EST ICI ---
         response = client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-4o-mini",  # <--- On passe au modèle rapide !
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"}
         )
@@ -121,28 +112,25 @@ def analyze_stock(ticker):
         }
 
     except Exception as e:
+        # On affiche l'erreur en rouge pour comprendre
         st.error(f"🚨 ERREUR sur {ticker} : {e}")
         return None
 
 # --- 3. INTERFACE ---
-st.title("🤖 AI Strategic Hunter")
-st.caption("Protected Access • Powered by GPT-4o")
+st.title("🤖 AI Strategic Hunter (Mini)")
 
 with st.sidebar:
     st.header("Portefeuille")
-    raw_text = st.text_area("Tickers (ex: NVDA TSLA)", "NVDA PLTR")
-    st.caption("💡 Astuce : Validez avec Ctrl+Entrée avant de lancer.")
-    
+    # On laisse NVDA par défaut pour le test
+    raw_text = st.text_area("Tickers", "NVDA") 
     tickers = [t.strip() for t in raw_text.replace(',',' ').split() if t.strip()]
-    launch = st.button("🚀 Analyser", type="primary")
+    launch = st.button("🚀 Analyser")
 
 if launch and tickers:
     for t in tickers:
-        with st.spinner(f"Analyse de {t} en cours..."):
+        with st.spinner(f"Analyse de {t} ({t})..."):
             data = analyze_stock(t)
-            
-            # --- LE FREIN À MAIN (Anti-Erreur 429) ---
-            time.sleep(2)  # Pause de 2 secondes entre chaque appel
+            time.sleep(1) # Petite pause de sécurité
             
         if data:
             with st.container(border=True):
@@ -158,5 +146,5 @@ if launch and tickers:
                     st.progress(score/100, text=f"Timing: {score}/100")
                     st.write(f"**{data['Verdict']}**")
                 
-                with st.expander(f"🧐 Voir l'analyse de {data['Ticker']}"):
+                with st.expander(f"Détails {data['Ticker']}"):
                     st.markdown(data['Détails'])
