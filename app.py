@@ -45,13 +45,35 @@ if not api_key:
 
 client = OpenAI(api_key=api_key)
 
-# --- 2. FONCTIONS ---
+# --- 2. FONCTION INTELLIGENTE (AVEC RETRY) ---
+def get_analysis_safe(prompt, max_retries=3):
+    """Force le passage si OpenAI bloque (Erreur 429)"""
+    for i in range(max_retries):
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",  # On force le modèle rapide
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"}
+            )
+            return json.loads(response.choices[0].message.content)
+        except Exception as e:
+            if "Rate limit" in str(e) or "429" in str(e):
+                wait_time = (i + 1) * 5 # Attendre 5s, puis 10s...
+                st.warning(f"⚠️ OpenAI sature. Nouvelle tentative dans {wait_time}s...")
+                time.sleep(wait_time)
+            else:
+                st.error(f"Erreur technique : {e}")
+                return None
+    st.error("🚨 Abandon après 3 tentatives. Le serveur OpenAI est trop chargé.")
+    return None
+
 @st.cache_data(ttl=3600)
 def analyze_stock(ticker):
     try:
         ticker = ticker.strip().upper()
         stock = yf.Ticker(ticker)
         
+        # Historique
         try:
             hist = stock.history(period="6mo")
         except:
@@ -63,76 +85,56 @@ def analyze_stock(ticker):
             current_price = hist['Close'].iloc[-1]
             
         if not current_price:
-            st.warning(f"⚠️ Prix introuvable pour {ticker}")
+            st.warning(f"Prix introuvable pour {ticker}")
             return None
 
+        # Infos allégées pour économiser des tokens
         pe = info.get('trailingPE', "N/A")
-        peg = info.get('pegRatio', "N/A")
         
-        news = stock.news[:2] if stock.news else []
-        news_txt = "\n".join([n.get('title','') for n in news])
+        news = stock.news[:1] if stock.news else [] # Une seule news pour aller vite
+        news_txt = news[0].get('title','') if news else "Pas de news récente"
 
+        # Prompt court
         prompt = f"""
-        Analyse {ticker} (${current_price}).
-        PE: {pe}, PEG: {peg}.
+        Stock: {ticker} (${current_price}). PE: {pe}.
         News: {news_txt}
-        Desc: {info.get('longBusinessSummary','')[:500]}
+        Business: {info.get('longBusinessSummary','')[:200]}
         
-        Tâche:
-        1. Catégorie (Infra, Robots, Agents, Legacy, Autre).
-        2. Score Timing (0-100).
-        3. Verdict (1 phrase courte).
-        4. Analyse (3 points clés avec tirets).
-        
-        JSON strict:
+        Analyze for an investor. Return JSON:
         {{
-            "category": "String",
-            "timing_score": Int,
-            "verdict": "String",
-            "analysis_points": "String"
+            "category": "String (Infrastructure, Robots, Software, Legacy, Other)",
+            "timing_score": Int (0-100),
+            "verdict": "String (Bullish/Bearish/Neutral)",
+            "analysis_points": "String (3 short bullet points)"
         }}
         """
 
-        # --- LE CHANGEMENT EST ICI ---
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",  # <--- On passe au modèle rapide !
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"}
-        )
-        data = json.loads(response.choices[0].message.content)
-        
+        # Appel sécurisé
         return {
             "Ticker": ticker,
             "Prix": current_price,
             "History": hist['Close'] if not hist.empty else None,
-            "Catégorie": data.get("category"),
-            "Timing": data.get("timing_score"),
-            "Verdict": data.get("verdict"),
-            "Détails": data.get("analysis_points")
+            **get_analysis_safe(prompt) # On fusionne le résultat JSON
         }
 
     except Exception as e:
-        # On affiche l'erreur en rouge pour comprendre
-        st.error(f"🚨 ERREUR sur {ticker} : {e}")
         return None
 
 # --- 3. INTERFACE ---
-st.title("🤖 AI Strategic Hunter (Mini)")
+st.title("🤖 AI Strategic Hunter (Retry Mode)")
 
 with st.sidebar:
     st.header("Portefeuille")
-    # On laisse NVDA par défaut pour le test
     raw_text = st.text_area("Tickers", "NVDA") 
     tickers = [t.strip() for t in raw_text.replace(',',' ').split() if t.strip()]
     launch = st.button("🚀 Analyser")
 
 if launch and tickers:
     for t in tickers:
-        with st.spinner(f"Analyse de {t} ({t})..."):
+        with st.spinner(f"Analyse de {t}..."):
             data = analyze_stock(t)
-            time.sleep(1) # Petite pause de sécurité
             
-        if data:
+        if data and data.get("Verdict"): # Vérifie qu'on a bien reçu des données
             with st.container(border=True):
                 c1, c2, c3 = st.columns([1, 2, 1])
                 with c1:
@@ -146,5 +148,7 @@ if launch and tickers:
                     st.progress(score/100, text=f"Timing: {score}/100")
                     st.write(f"**{data['Verdict']}**")
                 
-                with st.expander(f"Détails {data['Ticker']}"):
-                    st.markdown(data['Détails'])
+                with st.expander("Détails"):
+                    st.markdown(data.get('Détails', 'Pas de détails'))
+        else:
+            st.error(f"Impossible d'analyser {t} (Erreur API ou Données)")
