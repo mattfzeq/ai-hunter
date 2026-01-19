@@ -12,7 +12,7 @@ import re
 # --- 1. CONFIGURATION TERMINAL ---
 st.set_page_config(
     layout="wide", 
-    page_title="AI Strategic Hunter v15",
+    page_title="AI Strategic Hunter v16",
     page_icon="🦅",
     initial_sidebar_state="expanded"
 )
@@ -44,6 +44,11 @@ st.markdown("""
     .score-red { background: linear-gradient(90deg, #ff4444, #cc0000); }
     .score-orange { background: linear-gradient(90deg, #ff9933, #ff6600); }
     .score-green { background: linear-gradient(90deg, #00ff88, #00cc66); }
+    /* Chat Styling */
+    .stChatMessage {
+        background-color: #1a1a1a;
+        border-left: 3px solid #29b5e8;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -76,6 +81,10 @@ if not check_password(): st.stop()
 # --- INIT API ---
 api_key = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=api_key) if api_key else None
+
+# --- INIT CHAT STATE (v16) ---
+if 'chat_history' not in st.session_state:
+    st.session_state['chat_history'] = {}
 
 # --- 2. UTILITAIRES DE SÉCURITÉ ---
 
@@ -125,7 +134,102 @@ def render_score_bar(score):
     """
     return html
 
-# --- 3. MOTEUR DE DONNÉES ---
+# --- 3. MOTEUR DE CHAT CONTEXTUEL (v16) ---
+
+def build_context_prompt(ticker, data):
+    """
+    Construit un system prompt enrichi avec toutes les données de l'analyse.
+    Ce contexte sera invisible pour l'utilisateur mais guidera l'IA.
+    """
+    micro = data['Micro']
+    context = f"""Tu es un analyste financier expert spécialisé sur l'action {ticker}.
+
+DONNÉES DE L'ANALYSE EN COURS :
+- Ticker: {ticker}
+- Secteur: {data['Sector']}
+- Prix Actuel: ${data['Prix']:.2f}
+- Variation: {data['Change']:.2f}%
+- Score IA: {data['Score']}/100
+- Verdict: {data['Verdict']}
+- Thèse d'Investissement: {data['Thesis']}
+- Risque Principal: {data['Risque']}
+
+MÉTRIQUES FINANCIÈRES :
+- Market Cap: {micro.get('Market Cap')}
+- PE Ratio: {micro.get('PE Ratio')}
+- PEG Ratio: {micro.get('PEG')}
+- EPS: {micro.get('EPS')}
+- Dividend Yield: {micro.get('Div Yield')}
+- Beta: {micro.get('Beta')}
+- Profit Margin: {micro.get('Profit Margin')}
+- Revenue Growth YoY: {micro.get('Revenue YoY')}
+
+SOURCE DES DONNÉES: {data['Source']}
+
+DIRECTIVES :
+- Réponds de manière concise et professionnelle (style Bloomberg Terminal).
+- Utilise les données ci-dessus pour répondre aux questions de l'utilisateur.
+- Si la question sort du cadre de cette analyse, indique-le poliment.
+- Ne jamais inventer de données : base-toi uniquement sur le contexte fourni.
+- Si les données sont simulées (Source contains "Simulation"), mentionne-le si pertinent.
+"""
+    return context
+
+def chat_with_analyst(ticker, data, user_message):
+    """
+    Envoie une question à l'IA avec le contexte complet de l'action.
+    Gère les erreurs de manière gracieuse.
+    """
+    try:
+        if not client:
+            return "❌ Service d'analyse indisponible (clé API manquante)."
+        
+        # Construction du contexte
+        system_prompt = build_context_prompt(ticker, data)
+        
+        # Récupération de l'historique du chat pour ce ticker
+        if ticker not in st.session_state['chat_history']:
+            st.session_state['chat_history'][ticker] = []
+        
+        history = st.session_state['chat_history'][ticker]
+        
+        # Construction des messages pour l'API
+        messages = [{"role": "system", "content": system_prompt}]
+        
+        # Ajout de l'historique (max 10 derniers messages pour éviter le dépassement de tokens)
+        for msg in history[-10:]:
+            messages.append({"role": msg["role"], "content": msg["content"]})
+        
+        # Ajout du nouveau message utilisateur
+        messages.append({"role": "user", "content": user_message})
+        
+        # Appel API
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=messages,
+            max_tokens=500,
+            temperature=0.7
+        )
+        
+        assistant_response = response.choices[0].message.content
+        
+        # Sauvegarde dans l'historique
+        st.session_state['chat_history'][ticker].append({
+            "role": "user", 
+            "content": user_message
+        })
+        st.session_state['chat_history'][ticker].append({
+            "role": "assistant", 
+            "content": assistant_response
+        })
+        
+        return assistant_response
+        
+    except Exception as e:
+        error_msg = f"❌ Service temporairement indisponible. Erreur: {str(e)[:50]}"
+        return error_msg
+
+# --- 4. MOTEUR DE DONNÉES ---
 
 def generate_rich_mock_data(ticker):
     """Données de simulation riches (Fallback Mode)"""
@@ -245,7 +349,7 @@ def analyze_stock_pro(ticker):
         # FALLBACK TOTAL (Mode Simulation)
         return generate_rich_mock_data(ticker)
 
-# --- 4. INTERFACE TERMINAL ---
+# --- 5. INTERFACE TERMINAL ---
 
 # BANDEAU MACRO
 col_t1, col_t2, col_t3, col_t4 = st.columns(4)
@@ -257,8 +361,8 @@ st.divider()
 
 # SIDEBAR (Contrôles)
 with st.sidebar:
-    st.title("🦅 HUNTER V15")
-    st.caption("Hardened Edition")
+    st.title("🦅 HUNTER V16")
+    st.caption("Interactive Analyst")
     
     input_tickers = st.text_area("Watchlist", "NVDA PLTR AMD")
     tickers = [t.strip() for t in input_tickers.replace(',',' ').split() if t.strip()]
@@ -317,6 +421,45 @@ if run_btn and tickers:
                 st.write(f"**Risque:** {data['Risque']}")
                 if "Simulation" in data['Source']: 
                     st.caption("⚠️ Simulation Mode")
+
+            # --- MODULE DE CHAT CONTEXTUEL (v16) ---
+            with st.expander(f"💬 Discuter avec l'Analyste [{data['Ticker']}]"):
+                st.caption("Posez vos questions sur cette analyse. L'IA connaît toutes les métriques affichées ci-dessus.")
+                
+                # Initialisation de l'historique pour ce ticker si nécessaire
+                if data['Ticker'] not in st.session_state['chat_history']:
+                    st.session_state['chat_history'][data['Ticker']] = []
+                
+                # Affichage de l'historique des messages
+                chat_container = st.container()
+                with chat_container:
+                    for msg in st.session_state['chat_history'][data['Ticker']]:
+                        with st.chat_message(msg["role"]):
+                            st.write(msg["content"])
+                
+                # Input de chat
+                user_input = st.chat_input(
+                    f"Ex: Pourquoi le PE est si élevé pour {data['Ticker']} ?",
+                    key=f"chat_input_{data['Ticker']}"
+                )
+                
+                if user_input:
+                    # Affichage immédiat du message utilisateur
+                    with chat_container:
+                        with st.chat_message("user"):
+                            st.write(user_input)
+                    
+                    # Génération de la réponse
+                    with st.spinner("Analyse en cours..."):
+                        ai_response = chat_with_analyst(data['Ticker'], data, user_input)
+                    
+                    # Affichage de la réponse
+                    with chat_container:
+                        with st.chat_message("assistant"):
+                            st.write(ai_response)
+                    
+                    # Forcer le rerun pour mettre à jour l'affichage
+                    st.rerun()
 
         # Ajout des données au rapport CSV
         report_data.append({
