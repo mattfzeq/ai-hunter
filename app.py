@@ -1,4 +1,4 @@
-import import streamlit as st
+import streamlit as st
 import os
 import time
 import yfinance as yf
