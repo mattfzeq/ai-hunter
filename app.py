@@ -438,11 +438,9 @@ if run_btn and tickers:
                     st.session_state['chat_history'][data['Ticker']] = []
                 
                 # Affichage de l'historique des messages
-                chat_container = st.container()
-                with chat_container:
-                    for msg in st.session_state['chat_history'][data['Ticker']]:
-                        with st.chat_message(msg["role"]):
-                            st.write(msg["content"])
+                for msg in st.session_state['chat_history'][data['Ticker']]:
+                    with st.chat_message(msg["role"]):
+                        st.write(msg["content"])
                 
                 # Input de chat
                 user_input = st.chat_input(
@@ -451,21 +449,11 @@ if run_btn and tickers:
                 )
                 
                 if user_input:
-                    # Affichage immédiat du message utilisateur
-                    with chat_container:
-                        with st.chat_message("user"):
-                            st.write(user_input)
-                    
-                    # Génération de la réponse
+                    # Génération de la réponse (la sauvegarde est faite dans chat_with_analyst)
                     with st.spinner("Analyse en cours..."):
                         ai_response = chat_with_analyst(data['Ticker'], data, user_input)
                     
-                    # Affichage de la réponse
-                    with chat_container:
-                        with st.chat_message("assistant"):
-                            st.write(ai_response)
-                    
-                    # Forcer le rerun pour mettre à jour l'affichage
+                    # Le rerun va recharger la page avec l'historique mis à jour
                     st.rerun()
 
         # Ajout des données au rapport CSV
