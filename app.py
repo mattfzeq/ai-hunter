@@ -1,4 +1,4 @@
-import streamlit as st
+import import streamlit as st
 import os
 import time
 import yfinance as yf
@@ -365,7 +365,14 @@ with st.sidebar:
     st.caption("Interactive Analyst")
     
     input_tickers = st.text_area("Watchlist", "NVDA PLTR AMD")
-    tickers = [t.strip() for t in input_tickers.replace(',',' ').split() if t.strip()]
+    # Dédoublonnage automatique tout en préservant l'ordre
+    seen = set()
+    tickers = []
+    for t in input_tickers.replace(',',' ').split():
+        t = t.strip().upper()
+        if t and t not in seen:
+            seen.add(t)
+            tickers.append(t)
     
     st.markdown("---")
     run_btn = st.button("RUN ANALYSIS 🚀", type="primary", use_container_width=True)
@@ -459,51 +466,7 @@ if run_btn and tickers:
                             st.write(ai_response)
                     
                     # Forcer le rerun pour mettre à jour l'affichage
-                    # --- MODULE DE CHAT CONTEXTUEL (v16.1 STABLE) ---
-            with st.expander(f"💬 Discuter avec l'Analyste [{data['Ticker']}]"):
-                st.caption("Posez vos questions sur cette analyse.")
-                
-                # 1. Gestion de l'historique sécurisée
-                if data['Ticker'] not in st.session_state['chat_history']:
-                    st.session_state['chat_history'][data['Ticker']] = []
-                
-                # 2. Affichage des messages existants
-                for msg in st.session_state['chat_history'][data['Ticker']]:
-                    with st.chat_message(msg["role"]):
-                        st.write(msg["content"])
-                
-                # 3. Zone de saisie (Clé unique indispensable)
-                user_input = st.chat_input(
-                    f"Ex: Analyse le risque...",
-                    key=f"chat_input_{data['Ticker']}"
-                )
-                
-                # 4. Traitement SANS rerun (plus fluide et moins de bugs)
-                if user_input:
-                    # A. Affiche tout de suite la question de l'utilisateur
-                    with st.chat_message("user"):
-                        st.write(user_input)
-                    
-                    # B. Ajoute à l'historique
-                    st.session_state['chat_history'][data['Ticker']].append({
-                        "role": "user", 
-                        "content": user_input
-                    })
-                    
-                    # C. Génère la réponse
-                    with st.chat_message("assistant"):
-                        with st.spinner("Réflexion..."):
-                            try:
-                                response_text = chat_with_analyst(data['Ticker'], data, user_input)
-                                st.write(response_text)
-                                
-                                # D. Sauvegarde la réponse
-                                st.session_state['chat_history'][data['Ticker']].append({
-                                    "role": "assistant", 
-                                    "content": response_text
-                                })
-                            except Exception as e:
-                                st.error(f"Erreur de connexion : {e}")
+                    st.rerun()
 
         # Ajout des données au rapport CSV
         report_data.append({
