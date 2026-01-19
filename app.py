@@ -7,27 +7,43 @@ import json
 import pandas as pd
 import random
 import datetime
+import re
 
 # --- 1. CONFIGURATION TERMINAL ---
 st.set_page_config(
     layout="wide", 
-    page_title="AI Strategic Hunter v14",
+    page_title="AI Strategic Hunter v15",
     page_icon="🦅",
     initial_sidebar_state="expanded"
 )
 
-# --- CSS PRO ---
+# --- CSS PRO (Bloomberg Terminal Style) ---
 st.markdown("""
 <style>
     .block-container {padding-top: 1rem; padding-bottom: 5rem;}
     div[data-testid="stMetricValue"] {font-size: 1.4rem !important;}
     .stCard {background-color: #0e1117; border: 1px solid #303030;}
-    /* Style pour le bouton de téléchargement pour le rendre plus visible */
     div[data-testid="stDownloadButton"] button {
         width: 100%;
         border-color: #4CAF50;
         color: #4CAF50;
     }
+    /* Score Bar Custom Styles */
+    .score-bar {
+        width: 100%;
+        height: 8px;
+        border-radius: 4px;
+        background-color: #1e1e1e;
+        overflow: hidden;
+        margin-top: 5px;
+    }
+    .score-fill {
+        height: 100%;
+        transition: width 0.3s ease;
+    }
+    .score-red { background: linear-gradient(90deg, #ff4444, #cc0000); }
+    .score-orange { background: linear-gradient(90deg, #ff9933, #ff6600); }
+    .score-green { background: linear-gradient(90deg, #00ff88, #00cc66); }
 </style>
 """, unsafe_allow_html=True)
 
@@ -61,13 +77,62 @@ if not check_password(): st.stop()
 api_key = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=api_key) if api_key else None
 
-# --- 2. MOTEUR DE DONNÉES ---
+# --- 2. UTILITAIRES DE SÉCURITÉ ---
+
+def extract_json_safe(text):
+    """
+    Extraction sécurisée du JSON depuis la réponse OpenAI.
+    Gère les cas où l'IA ajoute du texte avant/après le JSON.
+    """
+    try:
+        # Tentative 1 : Parse direct
+        return json.loads(text)
+    except:
+        try:
+            # Tentative 2 : Extraction par regex du premier objet JSON trouvé
+            match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', text)
+            if match:
+                json_str = match.group(0)
+                return json.loads(json_str)
+            else:
+                raise Exception("No JSON found")
+        except:
+            # Tentative 3 : Recherche manuelle des accolades
+            try:
+                start = text.index('{')
+                end = text.rindex('}') + 1
+                return json.loads(text[start:end])
+            except:
+                # Échec total -> Retourne un objet vide pour déclencher le fallback
+                return {}
+
+def render_score_bar(score):
+    """
+    Génère une barre de progression HTML colorée selon le score.
+    Rouge < 50, Orange < 70, Vert >= 70
+    """
+    if score < 50:
+        color_class = "score-red"
+    elif score < 70:
+        color_class = "score-orange"
+    else:
+        color_class = "score-green"
+    
+    html = f"""
+    <div class="score-bar">
+        <div class="score-fill {color_class}" style="width: {score}%"></div>
+    </div>
+    """
+    return html
+
+# --- 3. MOTEUR DE DONNÉES ---
 
 def generate_rich_mock_data(ticker):
-    """Données de simulation riches"""
+    """Données de simulation riches (Fallback Mode)"""
     base = random.uniform(50, 800)
     prices = [base]
-    for _ in range(50): prices.append(prices[-1] * random.uniform(0.98, 1.02))
+    for _ in range(50): 
+        prices.append(prices[-1] * random.uniform(0.98, 1.02))
     
     micro = {
         "Market Cap": f"{random.uniform(50, 2000):.1f}B",
@@ -96,13 +161,22 @@ def generate_rich_mock_data(ticker):
 
 @st.cache_data(ttl=600)
 def analyze_stock_pro(ticker):
+    """
+    Analyse principale avec Graceful Degradation.
+    v15 : Ajout du throttling Yahoo et parsing JSON sécurisé.
+    """
     ticker = ticker.strip().upper()
+    
     try:
+        # ANTI-BAN : Throttling aléatoire (1-2 secondes)
+        time.sleep(random.uniform(1.0, 2.0))
+        
         stock = yf.Ticker(ticker)
         hist = stock.history(period="3mo")
         info = stock.info
         
-        if hist.empty: raise Exception("Yahoo Empty")
+        if hist.empty: 
+            raise Exception("Yahoo Empty")
         
         current = hist['Close'].iloc[-1]
         prev = hist['Close'].iloc[0]
@@ -119,19 +193,34 @@ def analyze_stock_pro(ticker):
             "Revenue YoY": f"{info.get('revenueGrowth', 0)*100:.1f}%"
         }
         
+        # ANALYSE IA (avec parsing JSON sécurisé)
         try:
-            if not client: raise Exception("No Key")
-            prompt = f"Analyse flash {ticker}. Prix {current}. Secteur {info.get('sector')}. Output JSON: {{'verdict': 'BUY/HOLD/SELL', 'score': 75, 'thesis': '1 phrase', 'risk': '1 mot'}}"
+            if not client: 
+                raise Exception("No Key")
+            
+            prompt = f"Analyse flash {ticker}. Prix {current}. Secteur {info.get('sector')}. Output JSON strict: {{'verdict': 'BUY/HOLD/SELL', 'score': 75, 'thesis': '1 phrase', 'risk': '1 mot'}}"
+            
             response = client.chat.completions.create(
-                model="gpt-3.5-turbo", messages=[{"role": "user", "content": prompt}]
+                model="gpt-3.5-turbo", 
+                messages=[{"role": "user", "content": prompt}]
             )
-            ai_data = json.loads(response.choices[0].message.content)
+            
+            # PARSING SÉCURISÉ v15
+            raw_text = response.choices[0].message.content
+            ai_data = extract_json_safe(raw_text)
+            
+            # Validation des clés essentielles
+            if not all(k in ai_data for k in ['verdict', 'score', 'thesis', 'risk']):
+                raise Exception("Incomplete JSON")
+            
             verdict = ai_data.get('verdict')
             thesis = ai_data.get('thesis')
             score = ai_data.get('score')
             risk = ai_data.get('risk')
             source = "✅ Données Réelles"
-        except:
+            
+        except Exception as e:
+            # FALLBACK IA (pas de crash)
             verdict = "NEUTRE"
             thesis = "Analyse technique seule (IA indisponible)."
             score = 50
@@ -139,18 +228,26 @@ def analyze_stock_pro(ticker):
             source = "⚠️ Yahoo (No IA)"
 
         return {
-            "Ticker": ticker, "Prix": current, "Change": change,
-            "History": hist, "Sector": info.get('sector', 'N/A'),
-            "Micro": micro, "Score": score, "Verdict": verdict,
-            "Thesis": thesis, "Risque": risk, "Source": source
+            "Ticker": ticker, 
+            "Prix": current, 
+            "Change": change,
+            "History": hist, 
+            "Sector": info.get('sector', 'N/A'),
+            "Micro": micro, 
+            "Score": score, 
+            "Verdict": verdict,
+            "Thesis": thesis, 
+            "Risque": risk, 
+            "Source": source
         }
 
     except Exception:
+        # FALLBACK TOTAL (Mode Simulation)
         return generate_rich_mock_data(ticker)
 
-# --- 3. INTERFACE TERMINAL ---
+# --- 4. INTERFACE TERMINAL ---
 
-# BANDEAU
+# BANDEAU MACRO
 col_t1, col_t2, col_t3, col_t4 = st.columns(4)
 with col_t1: st.metric("S&P 500", "4,890.23", "+0.45%")
 with col_t2: st.metric("NASDAQ", "15,450.10", "+0.80%")
@@ -160,8 +257,8 @@ st.divider()
 
 # SIDEBAR (Contrôles)
 with st.sidebar:
-    st.title("🦅 HUNTER V14")
-    st.caption("Agency Edition")
+    st.title("🦅 HUNTER V15")
+    st.caption("Hardened Edition")
     
     input_tickers = st.text_area("Watchlist", "NVDA PLTR AMD")
     tickers = [t.strip() for t in input_tickers.replace(',',' ').split() if t.strip()]
@@ -169,18 +266,19 @@ with st.sidebar:
     st.markdown("---")
     run_btn = st.button("RUN ANALYSIS 🚀", type="primary", use_container_width=True)
     
-    # Placeholder pour le bouton d'export (il apparaîtra après l'analyse)
+    # Placeholder pour le bouton d'export
     export_placeholder = st.empty()
 
 # MAIN CONTENT
 if run_btn and tickers:
-    report_data = [] # Liste pour stocker les données pour le CSV
+    report_data = []
     
     for t in tickers:
         data = analyze_stock_pro(t)
         
-        # CARD DESIGN
+        # CARD DESIGN (Bloomberg Terminal Style)
         with st.container(border=True):
+            # HEADER
             c_head1, c_head2, c_head3 = st.columns([2, 4, 2])
             with c_head1:
                 st.markdown(f"## {data['Ticker']}")
@@ -190,22 +288,35 @@ if run_btn and tickers:
                 st.metric("Prix Actuel", f"{data['Prix']:.2f} $", f"{data['Change']:.2f} %", delta_color=delta_color)
             with c_head3:
                 st.metric("AI Score", f"{data['Score']}/100", data['Verdict'])
+                st.markdown(render_score_bar(data['Score']), unsafe_allow_html=True)
 
             st.markdown("#### 🔢 Key Financials")
             m = data['Micro']
+            
+            # REFONTE UI : Metrics compactes au lieu de st.write
             k1, k2, k3, k4 = st.columns(4)
-            with k1: st.write(f"**Mkt Cap:** {m.get('Market Cap')}"); st.write(f"**Beta:** {m.get('Beta')}")
-            with k2: st.write(f"**PE:** {m.get('PE Ratio')}"); st.write(f"**EPS:** {m.get('EPS')}")
-            with k3: st.write(f"**Margin:** {m.get('Profit Margin')}"); st.write(f"**Rev:** {m.get('Revenue YoY')}")
-            with k4: st.write(f"**PEG:** {m.get('PEG')}"); st.write(f"**Yield:** {m.get('Div Yield')}")
+            with k1: 
+                st.metric("Market Cap", m.get('Market Cap'), border=True)
+                st.metric("Beta", m.get('Beta'), border=True)
+            with k2: 
+                st.metric("PE Ratio", m.get('PE Ratio'), border=True)
+                st.metric("EPS", m.get('EPS'), border=True)
+            with k3: 
+                st.metric("Profit Margin", m.get('Profit Margin'), border=True)
+                st.metric("Revenue YoY", m.get('Revenue YoY'), border=True)
+            with k4: 
+                st.metric("PEG Ratio", m.get('PEG'), border=True)
+                st.metric("Div Yield", m.get('Div Yield'), border=True)
 
             st.markdown("---")
             g1, g2 = st.columns([2, 1])
-            with g1: st.area_chart(data['History']['Close'], height=200, color="#29b5e8")
+            with g1: 
+                st.area_chart(data['History']['Close'], height=200, color="#29b5e8")
             with g2:
                 st.info(data['Thesis'])
                 st.write(f"**Risque:** {data['Risque']}")
-                if "Simulation" in data['Source']: st.caption("⚠️ Simulation Mode")
+                if "Simulation" in data['Source']: 
+                    st.caption("⚠️ Simulation Mode")
 
         # Ajout des données au rapport CSV
         report_data.append({
@@ -224,7 +335,6 @@ if run_btn and tickers:
         df = pd.DataFrame(report_data)
         csv = df.to_csv(index=False).encode('utf-8')
         
-        # On injecte le bouton dans la sidebar via le placeholder
         with export_placeholder.container():
             st.success("✅ Analyse Terminée")
             st.download_button(
