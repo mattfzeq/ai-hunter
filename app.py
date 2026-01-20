@@ -12,7 +12,7 @@ import re
 # --- 1. CONFIGURATION TERMINAL ---
 st.set_page_config(
     layout="wide", 
-    page_title="AI Strategic Hunter v16",
+    page_title="AI Strategic Hunter v17",
     page_icon="🦅",
     initial_sidebar_state="expanded"
 )
@@ -134,7 +134,7 @@ def render_score_bar(score):
     """
     return html
 
-# --- 3. MOTEUR DE CHAT CONTEXTUEL (v16) ---
+# --- 3. MOTEUR DE CHAT CONTEXTUEL (v17 - Pattern Standard) ---
 
 def build_context_prompt(ticker, data):
     """
@@ -175,10 +175,10 @@ DIRECTIVES :
 """
     return context
 
-def chat_with_analyst(ticker, data, user_message):
+def get_ai_response(ticker, data, user_message, chat_history):
     """
-    Envoie une question à l'IA avec le contexte complet de l'action.
-    Gère les erreurs de manière gracieuse.
+    Génère une réponse de l'IA avec le contexte complet.
+    Retourne la réponse ou un message d'erreur.
     """
     try:
         if not client:
@@ -187,17 +187,11 @@ def chat_with_analyst(ticker, data, user_message):
         # Construction du contexte
         system_prompt = build_context_prompt(ticker, data)
         
-        # Récupération de l'historique du chat pour ce ticker
-        if ticker not in st.session_state['chat_history']:
-            st.session_state['chat_history'][ticker] = []
-        
-        history = st.session_state['chat_history'][ticker]
-        
         # Construction des messages pour l'API
         messages = [{"role": "system", "content": system_prompt}]
         
-        # Ajout de l'historique (max 10 derniers messages pour éviter le dépassement de tokens)
-        for msg in history[-10:]:
+        # Ajout de l'historique (max 10 derniers messages)
+        for msg in chat_history[-10:]:
             messages.append({"role": msg["role"], "content": msg["content"]})
         
         # Ajout du nouveau message utilisateur
@@ -211,23 +205,10 @@ def chat_with_analyst(ticker, data, user_message):
             temperature=0.7
         )
         
-        assistant_response = response.choices[0].message.content
-        
-        # Sauvegarde dans l'historique
-        st.session_state['chat_history'][ticker].append({
-            "role": "user", 
-            "content": user_message
-        })
-        st.session_state['chat_history'][ticker].append({
-            "role": "assistant", 
-            "content": assistant_response
-        })
-        
-        return assistant_response
+        return response.choices[0].message.content
         
     except Exception as e:
-        error_msg = f"❌ Service temporairement indisponible. Erreur: {str(e)[:50]}"
-        return error_msg
+        return f"❌ Service temporairement indisponible. Erreur: {str(e)[:100]}"
 
 # --- 4. MOTEUR DE DONNÉES ---
 
@@ -267,7 +248,7 @@ def generate_rich_mock_data(ticker):
 def analyze_stock_pro(ticker):
     """
     Analyse principale avec Graceful Degradation.
-    v15 : Ajout du throttling Yahoo et parsing JSON sécurisé.
+    v15+ : Throttling Yahoo et parsing JSON sécurisé.
     """
     ticker = ticker.strip().upper()
     
@@ -309,7 +290,7 @@ def analyze_stock_pro(ticker):
                 messages=[{"role": "user", "content": prompt}]
             )
             
-            # PARSING SÉCURISÉ v15
+            # PARSING SÉCURISÉ
             raw_text = response.choices[0].message.content
             ai_data = extract_json_safe(raw_text)
             
@@ -361,18 +342,14 @@ st.divider()
 
 # SIDEBAR (Contrôles)
 with st.sidebar:
-    st.title("🦅 HUNTER V16")
-    st.caption("Interactive Analyst")
+    st.title("🦅 HUNTER V17")
+    st.caption("Stable Edition")
     
     input_tickers = st.text_area("Watchlist", "NVDA PLTR AMD")
-    # Dédoublonnage automatique tout en préservant l'ordre
-    seen = set()
-    tickers = []
-    for t in input_tickers.replace(',',' ').split():
-        t = t.strip().upper()
-        if t and t not in seen:
-            seen.add(t)
-            tickers.append(t)
+    
+    # DÉDOUBLONNAGE STRICT v17 : Préserve l'ordre + Normalisation
+    raw_tickers = [t.strip().upper() for t in input_tickers.replace(',',' ').split() if t.strip()]
+    tickers = list(dict.fromkeys(raw_tickers))  # Élimine doublons en gardant l'ordre
     
     st.markdown("---")
     run_btn = st.button("RUN ANALYSIS 🚀", type="primary", use_container_width=True)
@@ -404,7 +381,7 @@ if run_btn and tickers:
             st.markdown("#### 🔢 Key Financials")
             m = data['Micro']
             
-            # REFONTE UI : Metrics compactes au lieu de st.write
+            # REFONTE UI : Metrics compactes
             k1, k2, k3, k4 = st.columns(4)
             with k1: 
                 st.metric("Market Cap", m.get('Market Cap'), border=True)
@@ -429,32 +406,50 @@ if run_btn and tickers:
                 if "Simulation" in data['Source']: 
                     st.caption("⚠️ Simulation Mode")
 
-            # --- MODULE DE CHAT CONTEXTUEL (v16) ---
+            # --- MODULE DE CHAT CONTEXTUEL (v17 - PATTERN STANDARD) ---
             with st.expander(f"💬 Discuter avec l'Analyste [{data['Ticker']}]"):
                 st.caption("Posez vos questions sur cette analyse. L'IA connaît toutes les métriques affichées ci-dessus.")
                 
-                # Initialisation de l'historique pour ce ticker si nécessaire
+                # Initialisation de l'historique pour ce ticker
                 if data['Ticker'] not in st.session_state['chat_history']:
                     st.session_state['chat_history'][data['Ticker']] = []
                 
-                # Affichage de l'historique des messages
-                for msg in st.session_state['chat_history'][data['Ticker']]:
-                    with st.chat_message(msg["role"]):
-                        st.write(msg["content"])
+                # ÉTAPE 1 : Afficher l'historique existant
+                for message in st.session_state['chat_history'][data['Ticker']]:
+                    with st.chat_message(message["role"]):
+                        st.write(message["content"])
                 
-                # Input de chat
-                user_input = st.chat_input(
+                # ÉTAPE 2 : Capturer le nouveau message (PATTERN STANDARD)
+                if prompt := st.chat_input(
                     f"Ex: Pourquoi le PE est si élevé pour {data['Ticker']} ?",
                     key=f"chat_input_{data['Ticker']}"
-                )
-                
-                if user_input:
-                    # Génération de la réponse (la sauvegarde est faite dans chat_with_analyst)
-                    with st.spinner("Analyse en cours..."):
-                        ai_response = chat_with_analyst(data['Ticker'], data, user_input)
+                ):
+                    # ÉTAPE 3 : Afficher immédiatement le message utilisateur
+                    with st.chat_message("user"):
+                        st.write(prompt)
                     
-                    # Le rerun va recharger la page avec l'historique mis à jour
-                    st.rerun()
+                    # ÉTAPE 4 : Générer et afficher la réponse assistant
+                    with st.chat_message("assistant"):
+                        with st.spinner("Analyse en cours..."):
+                            response = get_ai_response(
+                                data['Ticker'], 
+                                data, 
+                                prompt, 
+                                st.session_state['chat_history'][data['Ticker']]
+                            )
+                        st.write(response)
+                    
+                    # ÉTAPE 5 : Sauvegarder dans session_state À LA FIN
+                    st.session_state['chat_history'][data['Ticker']].append({
+                        "role": "user",
+                        "content": prompt
+                    })
+                    st.session_state['chat_history'][data['Ticker']].append({
+                        "role": "assistant",
+                        "content": response
+                    })
+                    
+                    # PAS DE st.rerun() - Laisse Streamlit gérer le flux naturel
 
         # Ajout des données au rapport CSV
         report_data.append({
