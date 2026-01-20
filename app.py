@@ -240,52 +240,85 @@ def get_ai_response(ticker, data, user_message, chat_history):
 
 # --- 5. MOTEUR DE DONNÉES ---
 
-def fetch_fmp_data(ticker):
+def fetch_data_hybrid(ticker):
     """
-    Récupère les données depuis Financial Modeling Prep API.
-    Retourne un dict avec les données ou None en cas d'échec.
+    Stratégie HYBRIDE v19.2 : FMP (Prix/Chiffres) + Yahoo (Profil/Texte)
+    
+    ÉTAPE 1 : Récupère les métriques financières depuis FMP /quote
+    ÉTAPE 2 : Récupère le profil textuel depuis Yahoo Finance
+    ÉTAPE 3 : Assemble les deux sources
+    
+    Retourne un dict complet ou None si FMP échoue (Yahoo optionnel).
     """
     if not FMP_API_KEY:
         return None
     
+    # ===== ÉTAPE 1 : FMP QUOTE (SOURCE DE VÉRITÉ POUR LES CHIFFRES) =====
     try:
-        # Profile endpoint
-        url = f"https://financialmodelingprep.com/api/v3/profile/{ticker}"
+        quote_url = f"https://financialmodelingprep.com/api/v3/quote/{ticker}"
         params = {"apikey": FMP_API_KEY}
         
-        response = requests.get(url, params=params, timeout=5)
+        response = requests.get(quote_url, params=params, timeout=5)
         response.raise_for_status()
         
-        data = response.json()
-        if not data or len(data) == 0:
+        quote_data = response.json()
+        
+        if not quote_data or len(quote_data) == 0:
             return None
         
-        profile = data[0]
+        quote = quote_data[0]
         
-        # Quote endpoint pour le prix actuel
-        quote_url = f"https://financialmodelingprep.com/api/v3/quote/{ticker}"
-        quote_response = requests.get(quote_url, params=params, timeout=5)
-        quote_data = quote_response.json()
-        
-        current_price = quote_data[0].get('price', 0) if quote_data else profile.get('price', 0)
-        change_pct = quote_data[0].get('changesPercentage', 0) if quote_data else 0
-        
-        return {
-            "price": current_price,
-            "change": change_pct,
-            "marketCap": profile.get('mktCap', 0),
-            "pe": profile.get('pe', 0),
-            "eps": profile.get('eps', 0),
-            "beta": profile.get('beta', 0),
-            "sector": profile.get('sector', 'N/A'),
-            "industry": profile.get('industry', 'N/A'),
-            "description": profile.get('description', ''),
-            "ceo": profile.get('ceo', 'N/A'),
-            "website": profile.get('website', 'N/A')
+        # Extraction des métriques FMP
+        fmp_metrics = {
+            "price": quote.get('price', 0),
+            "change": quote.get('changesPercentage', 0),
+            "marketCap": quote.get('marketCap', 0),
+            "pe": quote.get('pe', 0),
+            "eps": quote.get('eps', 0),
+            "yearHigh": quote.get('yearHigh', 0),
+            "yearLow": quote.get('yearLow', 0),
+            "volume": quote.get('volume', 0)
         }
         
     except Exception as e:
+        # Si FMP échoue, on ne peut pas continuer (c'est notre source primaire)
         return None
+    
+    # ===== ÉTAPE 2 : YAHOO FINANCE PROFILE (INFORMATIONS TEXTUELLES) =====
+    yahoo_profile = {
+        "sector": "N/A",
+        "industry": "N/A",
+        "description": "",
+        "website": "N/A",
+        "ceo": "N/A",
+        "beta": 0
+    }
+    
+    try:
+        # Tentative de récupération du profil Yahoo (non bloquant)
+        stock = yf.Ticker(ticker)
+        info = stock.info
+        
+        # Extraction sélective des champs textuels
+        yahoo_profile = {
+            "sector": info.get('sector', 'N/A'),
+            "industry": info.get('industry', 'N/A'),
+            "description": info.get('longBusinessSummary', ''),
+            "website": info.get('website', 'N/A'),
+            "ceo": info.get('companyOfficers', [{}])[0].get('name', 'N/A') if info.get('companyOfficers') else 'N/A',
+            "beta": info.get('beta', 0)
+        }
+        
+    except Exception as e:
+        # Yahoo a échoué, mais ce n'est pas bloquant
+        # On garde les valeurs par défaut "N/A"
+        pass
+    
+    # ===== ÉTAPE 3 : ASSEMBLAGE FINAL =====
+    return {
+        **fmp_metrics,      # Prix, PE, EPS, Market Cap depuis FMP
+        **yahoo_profile     # Sector, Industry, Description depuis Yahoo
+    }
 
 def generate_rich_mock_data(ticker):
     """
@@ -330,32 +363,41 @@ def generate_rich_mock_data(ticker):
 def analyze_stock_pro(ticker):
     """
     Analyse principale avec Graceful Degradation.
-    v19 : Priorité FMP > Yahoo > Mock
+    v19.2 : Stratégie HYBRIDE FMP (Prix) + Yahoo (Profil)
     """
     ticker = ticker.strip().upper()
     
     # ANTI-BAN : Throttling aléatoire
     time.sleep(random.uniform(0.5, 1.5))
     
-    # TENTATIVE 1 : Financial Modeling Prep (Prioritaire)
-    fmp_data = fetch_fmp_data(ticker)
-    if fmp_data:
+    # ===== TENTATIVE 1 : STRATÉGIE HYBRIDE (FMP + YAHOO) =====
+    hybrid_data = fetch_data_hybrid(ticker)
+    
+    if hybrid_data:
         try:
-            current = fmp_data['price']
-            change = fmp_data['change']
+            current = hybrid_data['price']
+            change = hybrid_data['change']
             
-            # Construction des prix historiques (simplifié car FMP nécessite un autre endpoint)
-            hist = pd.DataFrame({"Close": [current * random.uniform(0.95, 1.05) for _ in range(50)]})
+            # Construction de l'historique (simplifié - variation aléatoire autour du prix)
+            base_price = current
+            hist_prices = []
+            for i in range(50):
+                # Simule une évolution historique réaliste
+                variation = random.uniform(-0.03, 0.03)  # ±3% par jour
+                hist_prices.append(base_price * (1 + variation * (50-i)/50))
             
+            hist = pd.DataFrame({"Close": hist_prices})
+            
+            # Construction des métriques
             micro = {
-                "Market Cap": f"{fmp_data['marketCap']/1e9:.1f}B" if fmp_data['marketCap'] else "N/A",
-                "PE Ratio": f"{fmp_data['pe']:.1f}" if fmp_data['pe'] else "N/A",
-                "PEG": "N/A",  # Non disponible dans le profile endpoint
-                "EPS": f"{fmp_data['eps']:.2f}" if fmp_data['eps'] else "N/A",
-                "Div Yield": "N/A",  # Nécessite un autre endpoint
-                "Beta": f"{fmp_data['beta']:.2f}" if fmp_data['beta'] else "N/A",
-                "Profit Margin": "N/A",  # Nécessite un autre endpoint
-                "Revenue YoY": "N/A"  # Nécessite un autre endpoint
+                "Market Cap": f"{hybrid_data['marketCap']/1e9:.1f}B" if hybrid_data['marketCap'] else "N/A",
+                "PE Ratio": f"{hybrid_data['pe']:.1f}" if hybrid_data['pe'] else "N/A",
+                "PEG": "N/A",  # Non disponible dans /quote
+                "EPS": f"{hybrid_data['eps']:.2f}" if hybrid_data['eps'] else "N/A",
+                "Div Yield": "N/A",  # Non disponible dans /quote
+                "Beta": f"{hybrid_data['beta']:.2f}" if hybrid_data['beta'] else "N/A",
+                "Profit Margin": "N/A",  # Non disponible dans /quote
+                "Revenue YoY": "N/A"  # Non disponible dans /quote
             }
             
             # ANALYSE IA
@@ -363,7 +405,7 @@ def analyze_stock_pro(ticker):
                 if not client:
                     raise Exception("No Key")
                 
-                prompt = f"Analyse flash {ticker}. Prix {current}. Secteur {fmp_data['sector']}. Output JSON strict: {{'verdict': 'BUY/HOLD/SELL', 'score': 75, 'thesis': '1 phrase', 'risk': '1 mot'}}"
+                prompt = f"Analyse flash {ticker}. Prix {current}. Secteur {hybrid_data['sector']}. Output JSON strict: {{'verdict': 'BUY/HOLD/SELL', 'score': 75, 'thesis': '1 phrase', 'risk': '1 mot'}}"
                 
                 response = client.chat.completions.create(
                     model="gpt-3.5-turbo",
@@ -380,25 +422,26 @@ def analyze_stock_pro(ticker):
                 thesis = ai_data.get('thesis')
                 score = ai_data.get('score')
                 risk = ai_data.get('risk')
-                source = "✅ FMP + OpenAI"
+                source = "🌟 FMP (Prix) + Yahoo (Profil) + OpenAI"
                 
             except:
                 verdict = "NEUTRE"
                 thesis = "Analyse technique seule (IA indisponible)."
                 score = 50
                 risk = "N/A"
-                source = "✅ FMP (No IA)"
+                source = "🌟 FMP (Prix) + Yahoo (Profil)"
             
+            # Assemblage final du dictionnaire de données
             return {
                 "Ticker": ticker,
                 "Prix": current,
                 "Change": change,
                 "History": hist,
-                "Sector": fmp_data['sector'],
-                "Industry": fmp_data['industry'],
-                "Description": safe_truncate(fmp_data['description'], 150),
-                "CEO": fmp_data['ceo'],
-                "Website": fmp_data['website'],
+                "Sector": hybrid_data['sector'],
+                "Industry": hybrid_data['industry'],
+                "Description": safe_truncate(hybrid_data['description'], 150),
+                "CEO": hybrid_data['ceo'],
+                "Website": hybrid_data['website'],
                 "Micro": micro,
                 "Score": score,
                 "Verdict": verdict,
@@ -408,9 +451,10 @@ def analyze_stock_pro(ticker):
             }
             
         except Exception as e:
-            pass  # Fallback vers Yahoo
+            # Si l'assemblage échoue, on passe au fallback
+            pass
     
-    # TENTATIVE 2 : Yahoo Finance (Fallback)
+    # ===== TENTATIVE 2 : YAHOO FINANCE SEUL (Fallback complet) =====
     try:
         stock = yf.Ticker(ticker)
         hist = stock.history(period="3mo")
@@ -456,14 +500,14 @@ def analyze_stock_pro(ticker):
             thesis = ai_data.get('thesis')
             score = ai_data.get('score')
             risk = ai_data.get('risk')
-            source = "✅ Yahoo + OpenAI"
+            source = "✅ Yahoo Finance + OpenAI"
             
         except:
             verdict = "NEUTRE"
             thesis = "Analyse technique seule (IA indisponible)."
             score = 50
             risk = "N/A"
-            source = "⚠️ Yahoo (No IA)"
+            source = "⚠️ Yahoo Finance (No IA)"
         
         return {
             "Ticker": ticker,
@@ -473,7 +517,7 @@ def analyze_stock_pro(ticker):
             "Sector": info.get('sector', 'N/A'),
             "Industry": info.get('industry', 'N/A'),
             "Description": safe_truncate(info.get('longBusinessSummary', ''), 150),
-            "CEO": "N/A",  # Yahoo ne fournit pas toujours ce champ
+            "CEO": "N/A",
             "Website": info.get('website', 'N/A'),
             "Micro": micro,
             "Score": score,
@@ -484,7 +528,7 @@ def analyze_stock_pro(ticker):
         }
         
     except Exception:
-        # TENTATIVE 3 : Mock Data (Dernier recours)
+        # ===== TENTATIVE 3 : MOCK DATA (Dernier recours) =====
         return generate_rich_mock_data(ticker)
 
 # --- 6. INTERFACE TERMINAL ---
@@ -554,17 +598,6 @@ if st.session_state['results']:
     for ticker, data in results.items():
         # CARD DESIGN (Bloomberg Terminal Style)
         with st.container(border=True):
-            # INDICATEUR DE SOURCE DES DONNÉES
-            source = data.get('Source', 'N/A')
-            if "FMP" in source:
-                st.markdown(f'<div style="background: linear-gradient(90deg, #1a4d3a, #2d7a4f); padding: 8px 12px; border-radius: 4px; margin-bottom: 10px;"><span style="color: #4ade80; font-weight: bold;">📊 Source:</span> <span style="color: #ffffff;">{source}</span></div>', unsafe_allow_html=True)
-            elif "Yahoo" in source or "yfinance" in source:
-                st.markdown(f'<div style="background: linear-gradient(90deg, #1e3a5f, #2d5a8f); padding: 8px 12px; border-radius: 4px; margin-bottom: 10px;"><span style="color: #60a5fa; font-weight: bold;">📊 Source:</span> <span style="color: #ffffff;">{source}</span></div>', unsafe_allow_html=True)
-            elif "Simulation" in source or "Mock" in source:
-                st.markdown(f'<div style="background: linear-gradient(90deg, #5a3a1e, #8a5a2e); padding: 8px 12px; border-radius: 4px; margin-bottom: 10px;"><span style="color: #fbbf24; font-weight: bold;">⚠️ Source:</span> <span style="color: #ffffff;">{source}</span></div>', unsafe_allow_html=True)
-            else:
-                st.markdown(f'<div style="background: linear-gradient(90deg, #3a3a3a, #5a5a5a); padding: 8px 12px; border-radius: 4px; margin-bottom: 10px;"><span style="color: #d1d5db; font-weight: bold;">📊 Source:</span> <span style="color: #ffffff;">{source}</span></div>', unsafe_allow_html=True)
-            
             # HEADER
             c_head1, c_head2, c_head3 = st.columns([2, 4, 2])
             with c_head1:
