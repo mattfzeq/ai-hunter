@@ -1,6 +1,7 @@
 import streamlit as st
 import os
 import time
+import yfinance as yf
 from openai import OpenAI
 import json
 import pandas as pd
@@ -12,7 +13,7 @@ import requests
 # --- 1. CONFIGURATION TERMINAL ---
 st.set_page_config(
     layout="wide", 
-    page_title="AI Strategic Hunter v19.1",
+    page_title="AI Strategic Hunter v19",
     page_icon="🦅",
     initial_sidebar_state="expanded"
 )
@@ -118,11 +119,14 @@ def safe_truncate(text, length=15):
 def extract_json_safe(text):
     """
     Extraction sécurisée du JSON depuis la réponse OpenAI.
+    Gère les cas où l'IA ajoute du texte avant/après le JSON.
     """
     try:
+        # Tentative 1 : Parse direct
         return json.loads(text)
     except:
         try:
+            # Tentative 2 : Extraction par regex du premier objet JSON trouvé
             match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', text)
             if match:
                 json_str = match.group(0)
@@ -130,14 +134,20 @@ def extract_json_safe(text):
             else:
                 raise Exception("No JSON found")
         except:
+            # Tentative 3 : Recherche manuelle des accolades
             try:
                 start = text.index('{')
                 end = text.rindex('}') + 1
                 return json.loads(text[start:end])
             except:
+                # Échec total -> Retourne un objet vide pour déclencher le fallback
                 return {}
 
 def render_score_bar(score):
+    """
+    Génère une barre de progression HTML colorée selon le score.
+    Rouge < 50, Orange < 70, Vert >= 70
+    """
     if score < 50:
         color_class = "score-red"
     elif score < 70:
@@ -155,6 +165,9 @@ def render_score_bar(score):
 # --- 4. MOTEUR DE CHAT CONTEXTUEL ---
 
 def build_context_prompt(ticker, data):
+    """
+    Construit un system prompt enrichi avec toutes les données de l'analyse.
+    """
     micro = data['Micro']
     context = f"""Tu es un analyste financier expert spécialisé sur l'action {ticker}.
 
@@ -191,41 +204,65 @@ DIRECTIVES :
     return context
 
 def get_ai_response(ticker, data, user_message, chat_history):
+    """
+    Génère une réponse de l'IA avec le contexte complet.
+    Retourne la réponse ou un message d'erreur.
+    """
     try:
         if not client:
             return "❌ Service d'analyse indisponible (clé API OpenAI manquante)."
         
+        # Construction du contexte
         system_prompt = build_context_prompt(ticker, data)
+        
+        # Construction des messages pour l'API
         messages = [{"role": "system", "content": system_prompt}]
+        
+        # Ajout de l'historique (max 10 derniers messages)
         for msg in chat_history[-10:]:
             messages.append({"role": msg["role"], "content": msg["content"]})
+        
+        # Ajout du nouveau message utilisateur
         messages.append({"role": "user", "content": user_message})
         
+        # Appel API
         response = client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=messages,
             max_tokens=500,
             temperature=0.7
         )
+        
         return response.choices[0].message.content
+        
     except Exception as e:
         return f"❌ Service temporairement indisponible. Erreur: {str(e)[:100]}"
 
 # --- 5. MOTEUR DE DONNÉES ---
 
 def fetch_fmp_data(ticker):
+    """
+    Récupère les données depuis Financial Modeling Prep API.
+    Retourne un dict avec les données ou None en cas d'échec.
+    """
     if not FMP_API_KEY:
         return None
+    
     try:
+        # Profile endpoint
         url = f"https://financialmodelingprep.com/api/v3/profile/{ticker}"
         params = {"apikey": FMP_API_KEY}
+        
         response = requests.get(url, params=params, timeout=5)
         response.raise_for_status()
+        
         data = response.json()
         if not data or len(data) == 0:
             return None
+        
         profile = data[0]
         
+        # Quote endpoint pour le prix actuel
         quote_url = f"https://financialmodelingprep.com/api/v3/quote/{ticker}"
         quote_response = requests.get(quote_url, params=params, timeout=5)
         quote_data = quote_response.json()
@@ -246,10 +283,15 @@ def fetch_fmp_data(ticker):
             "ceo": profile.get('ceo', 'N/A'),
             "website": profile.get('website', 'N/A')
         }
+        
     except Exception as e:
         return None
 
 def generate_rich_mock_data(ticker):
+    """
+    Données de simulation riches (Fallback Mode).
+    v19 : TOUS les champs nécessaires sont présents.
+    """
     base = random.uniform(50, 800)
     prices = [base]
     for _ in range(50): 
@@ -266,16 +308,17 @@ def generate_rich_mock_data(ticker):
         "Revenue YoY": f"+{random.uniform(5, 50):.1f}%"
     }
     
+    # FIX v19 : Ajout des champs manquants
     return {
         "Ticker": ticker,
         "Prix": prices[-1],
         "Change": (prices[-1] - prices[0]) / prices[0] * 100,
         "History": pd.DataFrame({"Close": prices}),
         "Sector": "Technology (Simulated)",
-        "Industry": "Software Infrastructure (Simulated)",
-        "Description": f"Simulation de {ticker} - Données générées pour démonstration.",
-        "CEO": "Simulated Executive",
-        "Website": "https://simulation.example.com",
+        "Industry": "Software Infrastructure (Simulated)",  # FIX: Ajout du champ
+        "Description": f"Simulation de {ticker} - Données générées pour démonstration.",  # FIX
+        "CEO": "Simulated Executive",  # FIX
+        "Website": "https://simulation.example.com",  # FIX
         "Micro": micro,
         "Score": random.randint(40, 95),
         "Verdict": "ACHAT (SIMULÉ)",
@@ -285,32 +328,48 @@ def generate_rich_mock_data(ticker):
     }
 
 def analyze_stock_pro(ticker):
+    """
+    Analyse principale avec Graceful Degradation.
+    v19 : Priorité FMP > Yahoo > Mock
+    """
     ticker = ticker.strip().upper()
+    
+    # ANTI-BAN : Throttling aléatoire
     time.sleep(random.uniform(0.5, 1.5))
     
-    # 1. FMP
+    # TENTATIVE 1 : Financial Modeling Prep (Prioritaire)
     fmp_data = fetch_fmp_data(ticker)
     if fmp_data:
         try:
             current = fmp_data['price']
             change = fmp_data['change']
+            
+            # Construction des prix historiques (simplifié car FMP nécessite un autre endpoint)
             hist = pd.DataFrame({"Close": [current * random.uniform(0.95, 1.05) for _ in range(50)]})
             
             micro = {
                 "Market Cap": f"{fmp_data['marketCap']/1e9:.1f}B" if fmp_data['marketCap'] else "N/A",
                 "PE Ratio": f"{fmp_data['pe']:.1f}" if fmp_data['pe'] else "N/A",
-                "PEG": "N/A",
+                "PEG": "N/A",  # Non disponible dans le profile endpoint
                 "EPS": f"{fmp_data['eps']:.2f}" if fmp_data['eps'] else "N/A",
-                "Div Yield": "N/A",
+                "Div Yield": "N/A",  # Nécessite un autre endpoint
                 "Beta": f"{fmp_data['beta']:.2f}" if fmp_data['beta'] else "N/A",
-                "Profit Margin": "N/A",
-                "Revenue YoY": "N/A" 
+                "Profit Margin": "N/A",  # Nécessite un autre endpoint
+                "Revenue YoY": "N/A"  # Nécessite un autre endpoint
             }
             
+            # ANALYSE IA
             try:
-                if not client: raise Exception("No Key")
+                if not client:
+                    raise Exception("No Key")
+                
                 prompt = f"Analyse flash {ticker}. Prix {current}. Secteur {fmp_data['sector']}. Output JSON strict: {{'verdict': 'BUY/HOLD/SELL', 'score': 75, 'thesis': '1 phrase', 'risk': '1 mot'}}"
-                response = client.chat.completions.create(model="gpt-3.5-turbo", messages=[{"role": "user", "content": prompt}])
+                
+                response = client.chat.completions.create(
+                    model="gpt-3.5-turbo",
+                    messages=[{"role": "user", "content": prompt}]
+                )
+                
                 raw_text = response.choices[0].message.content
                 ai_data = extract_json_safe(raw_text)
                 
@@ -321,7 +380,7 @@ def analyze_stock_pro(ticker):
                 thesis = ai_data.get('thesis')
                 score = ai_data.get('score')
                 risk = ai_data.get('risk')
-                source = "🌟 Données Réelles (FMP)"
+                source = "✅ FMP + OpenAI"
                 
             except:
                 verdict = "NEUTRE"
@@ -349,15 +408,88 @@ def analyze_stock_pro(ticker):
             }
             
         except Exception as e:
-            pass 
+            pass  # Fallback vers Yahoo
     
-    # 2. Yahoo Fallback... (Code abrégé pour lisibilité, mais supposé être présent dans ta version complète. Si tu veux la version Yahoo, dis-le moi, mais ici je me concentre sur l'affichage source)
-    # Pour faire simple dans ce correctif, je renvoie le Mock direct si FMP échoue, sauf si tu veux le code Yahoo complet.
-    
-    return generate_rich_mock_data(ticker)
+    # TENTATIVE 2 : Yahoo Finance (Fallback)
+    try:
+        stock = yf.Ticker(ticker)
+        hist = stock.history(period="3mo")
+        info = stock.info
+        
+        if hist.empty:
+            raise Exception("Yahoo Empty")
+        
+        current = hist['Close'].iloc[-1]
+        prev = hist['Close'].iloc[0]
+        change = ((current - prev) / prev) * 100
+        
+        micro = {
+            "Market Cap": f"{info.get('marketCap', 0)/1e9:.1f}B",
+            "PE Ratio": f"{info.get('trailingPE', 0):.1f}",
+            "PEG": f"{info.get('pegRatio', 0):.2f}",
+            "EPS": f"{info.get('trailingEps', 0):.2f}",
+            "Div Yield": f"{info.get('dividendYield', 0)*100:.2f}%" if info.get('dividendYield') else "0%",
+            "Beta": f"{info.get('beta', 0):.2f}",
+            "Profit Margin": f"{info.get('profitMargins', 0)*100:.1f}%",
+            "Revenue YoY": f"{info.get('revenueGrowth', 0)*100:.1f}%"
+        }
+        
+        # ANALYSE IA
+        try:
+            if not client:
+                raise Exception("No Key")
+            
+            prompt = f"Analyse flash {ticker}. Prix {current}. Secteur {info.get('sector')}. Output JSON strict: {{'verdict': 'BUY/HOLD/SELL', 'score': 75, 'thesis': '1 phrase', 'risk': '1 mot'}}"
+            
+            response = client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[{"role": "user", "content": prompt}]
+            )
+            
+            raw_text = response.choices[0].message.content
+            ai_data = extract_json_safe(raw_text)
+            
+            if not all(k in ai_data for k in ['verdict', 'score', 'thesis', 'risk']):
+                raise Exception("Incomplete JSON")
+            
+            verdict = ai_data.get('verdict')
+            thesis = ai_data.get('thesis')
+            score = ai_data.get('score')
+            risk = ai_data.get('risk')
+            source = "✅ Yahoo + OpenAI"
+            
+        except:
+            verdict = "NEUTRE"
+            thesis = "Analyse technique seule (IA indisponible)."
+            score = 50
+            risk = "N/A"
+            source = "⚠️ Yahoo (No IA)"
+        
+        return {
+            "Ticker": ticker,
+            "Prix": current,
+            "Change": change,
+            "History": hist,
+            "Sector": info.get('sector', 'N/A'),
+            "Industry": info.get('industry', 'N/A'),
+            "Description": safe_truncate(info.get('longBusinessSummary', ''), 150),
+            "CEO": "N/A",  # Yahoo ne fournit pas toujours ce champ
+            "Website": info.get('website', 'N/A'),
+            "Micro": micro,
+            "Score": score,
+            "Verdict": verdict,
+            "Thesis": thesis,
+            "Risque": risk,
+            "Source": source
+        }
+        
+    except Exception:
+        # TENTATIVE 3 : Mock Data (Dernier recours)
+        return generate_rich_mock_data(ticker)
 
 # --- 6. INTERFACE TERMINAL ---
 
+# BANDEAU MACRO
 col_t1, col_t2, col_t3, col_t4 = st.columns(4)
 with col_t1: st.metric("S&P 500", "4,890.23", "+0.45%")
 with col_t2: st.metric("NASDAQ", "15,450.10", "+0.80%")
@@ -365,11 +497,14 @@ with col_t3: st.metric("EUR/USD", "1.0850", "-0.12%")
 with col_t4: st.metric("BTC/USD", "64,230.00", "+2.40%")
 st.divider()
 
+# SIDEBAR (Contrôles)
 with st.sidebar:
-    st.title("🦅 HUNTER V19.1")
-    st.caption("Pro Infrastructure + Debug")
+    st.title("🦅 HUNTER V19")
+    st.caption("Professional Infrastructure")
     
     input_tickers = st.text_area("Watchlist", "NVDA PLTR AMD")
+    
+    # DÉDOUBLONNAGE STRICT : Préserve l'ordre + Normalisation
     raw_tickers = [t.strip().upper() for t in input_tickers.replace(',',' ').split() if t.strip()]
     tickers = list(dict.fromkeys(raw_tickers))
     
@@ -381,43 +516,56 @@ with st.sidebar:
     with col_btn2:
         reset_btn = st.button("🔄 RESET", type="secondary", use_container_width=True)
     
+    # RESET HANDLER
     if reset_btn:
         st.session_state['results'] = None
         st.session_state['chat_history'] = {}
         st.success("Cache effacé !")
         st.rerun()
     
+    # Placeholder pour le bouton d'export
     export_placeholder = st.empty()
     
+    # Indicateur de statut
     if st.session_state['results']:
         st.markdown("---")
         st.info(f"📊 {len(st.session_state['results'])} analyses en cache")
 
 # MAIN CONTENT
+
+# LOGIQUE v19 : PERSISTENCE
 if run_btn and tickers:
+    # EXÉCUTION D'ANALYSE (écrase le cache)
     with st.spinner("🔍 Analyse en cours..."):
         results = {}
         for t in tickers:
             results[t] = analyze_stock_pro(t)
+        
+        # SAUVEGARDE DANS SESSION STATE
         st.session_state['results'] = results
+    
     st.success("✅ Analyse terminée !")
 
+# AFFICHAGE (depuis le cache si disponible)
 if st.session_state['results']:
     results = st.session_state['results']
     report_data = []
     
     for ticker, data in results.items():
+        # CARD DESIGN (Bloomberg Terminal Style)
         with st.container(border=True):
-            
-            # --- DEBUG SOURCE DISPLAY (AJOUTÉ ICI) ---
-            if "FMP" in data['Source']:
-                st.success(f"🏆 SOURCE : {data['Source']}")
-            elif "Yahoo" in data['Source']:
-                st.warning(f"⚠️ SOURCE : {data['Source']}")
+            # INDICATEUR DE SOURCE DES DONNÉES
+            source = data.get('Source', 'N/A')
+            if "FMP" in source:
+                st.markdown(f'<div style="background: linear-gradient(90deg, #1a4d3a, #2d7a4f); padding: 8px 12px; border-radius: 4px; margin-bottom: 10px;"><span style="color: #4ade80; font-weight: bold;">📊 Source:</span> <span style="color: #ffffff;">{source}</span></div>', unsafe_allow_html=True)
+            elif "Yahoo" in source or "yfinance" in source:
+                st.markdown(f'<div style="background: linear-gradient(90deg, #1e3a5f, #2d5a8f); padding: 8px 12px; border-radius: 4px; margin-bottom: 10px;"><span style="color: #60a5fa; font-weight: bold;">📊 Source:</span> <span style="color: #ffffff;">{source}</span></div>', unsafe_allow_html=True)
+            elif "Simulation" in source or "Mock" in source:
+                st.markdown(f'<div style="background: linear-gradient(90deg, #5a3a1e, #8a5a2e); padding: 8px 12px; border-radius: 4px; margin-bottom: 10px;"><span style="color: #fbbf24; font-weight: bold;">⚠️ Source:</span> <span style="color: #ffffff;">{source}</span></div>', unsafe_allow_html=True)
             else:
-                st.error(f"🚧 SOURCE : {data['Source']}")
-            # ----------------------------------------
+                st.markdown(f'<div style="background: linear-gradient(90deg, #3a3a3a, #5a5a5a); padding: 8px 12px; border-radius: 4px; margin-bottom: 10px;"><span style="color: #d1d5db; font-weight: bold;">📊 Source:</span> <span style="color: #ffffff;">{source}</span></div>', unsafe_allow_html=True)
             
+            # HEADER
             c_head1, c_head2, c_head3 = st.columns([2, 4, 2])
             with c_head1:
                 st.markdown(f"## {data['Ticker']}")
@@ -456,54 +604,83 @@ if st.session_state['results']:
                 if "Simulation" in data['Source']: 
                     st.caption("⚠️ Simulation Mode")
                 
+                # Infos supplémentaires (v19)
                 if data.get('CEO') and data['CEO'] != 'N/A':
                     st.caption(f"CEO: {data['CEO']}")
                 if data.get('Website') and data['Website'] != 'N/A':
                     st.caption(f"🌐 {data['Website']}")
 
+            # --- MODULE DE CHAT CONTEXTUEL ---
             with st.expander(f"💬 Discuter avec l'Analyste [{data['Ticker']}]"):
-                st.caption("Posez vos questions sur cette analyse.")
+                st.caption("Posez vos questions sur cette analyse. L'IA connaît toutes les métriques affichées ci-dessus.")
                 
+                # Initialisation de l'historique pour ce ticker
                 if data['Ticker'] not in st.session_state['chat_history']:
                     st.session_state['chat_history'][data['Ticker']] = []
                 
+                # ÉTAPE 1 : Afficher l'historique existant
                 for message in st.session_state['chat_history'][data['Ticker']]:
                     with st.chat_message(message["role"]):
                         st.write(message["content"])
                 
-                if prompt := st.chat_input(f"Question sur {data['Ticker']}...", key=f"chat_input_{data['Ticker']}"):
+                # ÉTAPE 2 : Capturer le nouveau message
+                if prompt := st.chat_input(
+                    f"Ex: Pourquoi le PE est si élevé pour {data['Ticker']} ?",
+                    key=f"chat_input_{data['Ticker']}"
+                ):
+                    # ÉTAPE 3 : Afficher immédiatement le message utilisateur
                     with st.chat_message("user"):
                         st.write(prompt)
                     
+                    # ÉTAPE 4 : Générer et afficher la réponse assistant
                     with st.chat_message("assistant"):
-                        with st.spinner("..."):
+                        with st.spinner("Analyse en cours..."):
                             response = get_ai_response(
                                 data['Ticker'], 
                                 data, 
                                 prompt, 
                                 st.session_state['chat_history'][data['Ticker']]
                             )
-                            st.write(response)
+                        st.write(response)
                     
-                    st.session_state['chat_history'][data['Ticker']].append({"role": "user", "content": prompt})
-                    st.session_state['chat_history'][data['Ticker']].append({"role": "assistant", "content": response})
+                    # ÉTAPE 5 : Sauvegarder dans session_state
+                    st.session_state['chat_history'][data['Ticker']].append({
+                        "role": "user",
+                        "content": prompt
+                    })
+                    st.session_state['chat_history'][data['Ticker']].append({
+                        "role": "assistant",
+                        "content": response
+                    })
 
+        # Ajout des données au rapport CSV
         report_data.append({
             "Ticker": ticker,
             "Price": f"{data['Prix']:.2f}",
             "Change %": f"{data['Change']:.2f}",
             "Verdict": data['Verdict'],
             "Score": data['Score'],
+            "Thesis": data['Thesis'],
+            "PE Ratio": data['Micro'].get('PE Ratio'),
             "Source": data['Source']
         })
 
+    # --- GÉNÉRATION DU RAPPORT (SIDEBAR) ---
     if report_data:
         df = pd.DataFrame(report_data)
         csv = df.to_csv(index=False).encode('utf-8')
+        
         with export_placeholder.container():
             st.success("✅ Données en cache")
-            st.download_button("📥 TÉLÉCHARGER RAPPORT (CSV)", csv, f"Hunter_Report.csv", "text/csv")
+            st.download_button(
+                label="📥 TÉLÉCHARGER RAPPORT (CSV)",
+                data=csv,
+                file_name=f"Hunter_Report_{datetime.date.today()}.csv",
+                mime="text/csv",
+            )
             
             st.markdown("---")
-            avg = df['Change %'].astype(float).mean()
-            st.code(f"Tendance Globale: {'Haussière' if avg > 0 else 'Baissière'}", language="text")
+            st.markdown("**📧 Email Briefing:**")
+            avg_change = df['Change %'].astype(float).mean()
+            top_ticker = df.loc[df['Score'].idxmax()]['Ticker']
+            st.code(f"Analyse: {len(report_data)} actifs. Tendance: {'Haussière' if avg_change > 0 else 'Mixte'}. Top pick: {top_ticker}.", language="text")
