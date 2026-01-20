@@ -1,7 +1,7 @@
 import streamlit as st
 import os
 import time
-import yfinance as yf
+import requests  # Nouvelle librairie pour l'API
 from openai import OpenAI
 import json
 import pandas as pd
@@ -12,41 +12,26 @@ import re
 # --- 1. CONFIGURATION TERMINAL ---
 st.set_page_config(
     layout="wide", 
-    page_title="AI Strategic Hunter v17.1",
+    page_title="AI Strategic Hunter v18 (Pro)",
     page_icon="🦅",
     initial_sidebar_state="expanded"
 )
 
-# --- CSS PRO (Bloomberg Terminal Style) ---
+# --- CSS PRO ---
 st.markdown("""
 <style>
     .block-container {padding-top: 1rem; padding-bottom: 5rem;}
     div[data-testid="stMetricValue"] {font-size: 1.4rem !important;}
     .stCard {background-color: #0e1117; border: 1px solid #303030;}
     div[data-testid="stDownloadButton"] button {
-        width: 100%;
-        border-color: #4CAF50;
-        color: #4CAF50;
+        width: 100%; border-color: #4CAF50; color: #4CAF50;
     }
-    .score-bar {
-        width: 100%;
-        height: 8px;
-        border-radius: 4px;
-        background-color: #1e1e1e;
-        overflow: hidden;
-        margin-top: 5px;
-    }
-    .score-fill {
-        height: 100%;
-        transition: width 0.3s ease;
-    }
+    .score-bar { width: 100%; height: 8px; border-radius: 4px; background-color: #1e1e1e; overflow: hidden; margin-top: 5px; }
+    .score-fill { height: 100%; transition: width 0.3s ease; }
     .score-red { background: linear-gradient(90deg, #ff4444, #cc0000); }
     .score-orange { background: linear-gradient(90deg, #ff9933, #ff6600); }
     .score-green { background: linear-gradient(90deg, #00ff88, #00cc66); }
-    .stChatMessage {
-        background-color: #1a1a1a;
-        border-left: 3px solid #29b5e8;
-    }
+    .stChatMessage { background-color: #1a1a1a; border-left: 3px solid #29b5e8; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -76,31 +61,27 @@ def check_password():
 
 if not check_password(): st.stop()
 
-# --- INIT API ---
-api_key = os.getenv("OPENAI_API_KEY")
-client = OpenAI(api_key=api_key) if api_key else None
+# --- CLÉS API ---
+openai_key = os.getenv("OPENAI_API_KEY")
+client = OpenAI(api_key=openai_key) if openai_key else None
+
+# ⚠️ REMPLACEZ CECI PAR VOTRE CLÉ FMP OU METTEZ-LA DANS .ENV
+fmp_key = os.getenv("qekt69FL5hOYhieKn1KBDA0TUQZdAjAW", "DEMO") # Mettez votre clé ici si pas de .env
 
 # --- INIT STATE ---
-if 'chat_history' not in st.session_state:
-    st.session_state['chat_history'] = {}
-
-# CORRECTION DU BUG "BOUTON OUBLIEUX"
-if 'analysis_active' not in st.session_state:
-    st.session_state['analysis_active'] = False
+if 'chat_history' not in st.session_state: st.session_state['chat_history'] = {}
+if 'analysis_active' not in st.session_state: st.session_state['analysis_active'] = False
 
 # --- 2. UTILITAIRES ---
 
 def extract_json_safe(text):
-    """Extraction sécurisée du JSON"""
-    try:
-        return json.loads(text)
+    try: return json.loads(text)
     except:
         try:
             match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', text)
             if match: return json.loads(match.group(0))
-            else: raise Exception("No JSON")
-        except:
-            return {}
+            else: return {}
+        except: return {}
 
 def render_score_bar(score):
     if score < 50: color = "score-red"
@@ -108,188 +89,209 @@ def render_score_bar(score):
     else: color = "score-green"
     return f'<div class="score-bar"><div class="score-fill {color}" style="width: {score}%"></div></div>'
 
-# --- 3. MOTEUR CHAT (RAG) ---
+def format_large_number(num):
+    if not num: return "N/A"
+    if num >= 1e9: return f"{num/1e9:.2f}B"
+    if num >= 1e6: return f"{num/1e6:.2f}M"
+    return f"{num:.2f}"
 
-def build_context_prompt(ticker, data):
-    micro = data['Micro']
-    return f"""Analyste expert sur {ticker}.
-CONTEXTE:
-- Prix: ${data['Prix']:.2f} ({data['Change']:.2f}%)
-- Score: {data['Score']}/100 ({data['Verdict']})
-- Thèse: {data['Thesis']}
-- Risque: {data['Risque']}
-- PE: {micro.get('PE Ratio')} | Marge: {micro.get('Profit Margin')} | Growth: {micro.get('Revenue YoY')}
-DIRECTIVES: Réponse courte, style Bloomberg. Base-toi sur ces chiffres."""
+# --- 3. MOTEUR FMP (DATA RÉELLE) ---
 
-def chat_with_analyst(ticker, data, user_message):
+def get_fmp_data(ticker):
+    """Récupère les données VRAIES depuis Financial Modeling Prep"""
+    if fmp_key == "DEMO" and ticker != "AAPL":
+        return None # La clé DEMO ne marche que pour AAPL souvent
+    
     try:
-        if not client: return "❌ API Key manquante."
+        # 1. Profil (Prix, Beta, Secteur, Description)
+        url_profile = f"https://financialmodelingprep.com/api/v3/profile/{ticker}?apikey={fmp_key}"
+        profile = requests.get(url_profile).json()
         
-        system_prompt = build_context_prompt(ticker, data)
-        history = st.session_state['chat_history'].get(ticker, [])
-        
-        messages = [{"role": "system", "content": system_prompt}]
-        for msg in history[-6:]: # Contexte court
-            messages.append({"role": msg["role"], "content": msg["content"]})
-        messages.append({"role": "user", "content": user_message})
-        
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=messages,
-            max_tokens=300,
-            temperature=0.7
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        return f"❌ Erreur IA: {str(e)[:50]}"
+        if not profile: return None # Ticker invalide
+        p = profile[0]
 
-# --- 4. DATA ENGINE (FALLBACK) ---
+        # 2. Ratios Clés (PE, Marges) - Optionnel si quota limité, profil a déjà bcp
+        # On utilise les données du profil pour économiser les requêtes
+        
+        # 3. Historique (pour le graph)
+        url_hist = f"https://financialmodelingprep.com/api/v3/historical-price-full/{ticker}?timeseries=30&apikey={fmp_key}"
+        hist_data = requests.get(url_hist).json()
+        
+        prices = []
+        if 'historical' in hist_data:
+            # FMP donne du plus récent au plus vieux, on inverse
+            hist_list = hist_data['historical'][::-1]
+            prices = [day['close'] for day in hist_list]
+        
+        return {
+            "profile": p,
+            "history": prices
+        }
+    except Exception as e:
+        print(f"Erreur FMP: {e}")
+        return None
+
+# --- 4. MOTEUR ANALYSE ---
+
+def analyze_stock_real(ticker):
+    ticker = ticker.strip().upper()
+    
+    # A. TENTATIVE API PRO (FMP)
+    fmp_data = get_fmp_data(ticker)
+    
+    if fmp_data:
+        p = fmp_data['profile']
+        prices = fmp_data['history']
+        
+        # Calcul variation
+        current_price = p.get('price', 0)
+        # Variation du jour (si dispo) ou calculée
+        change_pct = p.get('changes', 0)
+        
+        # Construction Micro Data RÉELLE
+        micro = {
+            "Market Cap": format_large_number(p.get('mktCap')),
+            "PE Ratio": f"{p.get('lastDiv', 0):.2f}" if p.get('lastDiv') else "N/A", # FMP Profile donne parfois dividend pas PE direct, on adapte
+            "Beta": f"{p.get('beta', 0):.2f}",
+            "Volume": format_large_number(p.get('volAvg')),
+            "Sector": p.get('sector', 'N/A'),
+            "Industry": p.get('industry', 'N/A'),
+            "CEO": p.get('ceo', 'N/A'),
+            "Website": p.get('website', 'N/A'),
+            "Description": p.get('description', '')
+        }
+
+        # B. ANALYSE IA SUR DONNÉES RÉELLES
+        try:
+            if not client: raise Exception("No OpenAI Key")
+            
+            # Prompt enrichi avec la description officielle de la boîte
+            prompt = f"""
+            Analyse EXPERTE de {ticker}.
+            Données Officielles:
+            - Prix: {current_price} ({change_pct}%)
+            - Secteur: {micro['Sector']}
+            - Activité: {micro['Description'][:200]}...
+            
+            Tâche: Json output strict: {{'verdict': 'ACHAT/NEUTRE/VENTE', 'score': 75, 'thesis': '1 phrase percutante', 'risk': '1 mot'}}
+            """
+            resp = client.chat.completions.create(model="gpt-3.5-turbo", messages=[{"role": "user", "content": prompt}])
+            ai_data = extract_json_safe(resp.choices[0].message.content)
+            
+            return {
+                "Ticker": ticker, "Prix": current_price, "Change": change_pct,
+                "History": pd.DataFrame({"Close": prices}) if prices else None,
+                "Sector": micro['Sector'], "Micro": micro,
+                "Score": ai_data.get('score', 50), "Verdict": ai_data.get('verdict', 'NEUTRE'),
+                "Thesis": ai_data.get('thesis', 'Analyse fondamentale basée sur les données FMP.'),
+                "Risque": ai_data.get('risk', 'Marché'),
+                "Source": "🌟 Données FMP (Pro)"
+            }
+        except:
+            # Si IA échoue mais FMP marche
+            return {
+                "Ticker": ticker, "Prix": current_price, "Change": change_pct,
+                "History": pd.DataFrame({"Close": prices}) if prices else None,
+                "Sector": micro['Sector'], "Micro": micro,
+                "Score": 50, "Verdict": "DONNÉES SEULES", "Thesis": "IA non disponible.", "Risque": "N/A",
+                "Source": "✅ FMP (Sans IA)"
+            }
+
+    # C. FALLBACK SIMULATION (Si clé invalide ou quota dépassé)
+    else:
+        return generate_rich_mock_data(ticker)
 
 def generate_rich_mock_data(ticker):
+    """Fallback si l'API Pro échoue"""
     base = random.uniform(50, 800)
     prices = [base * random.uniform(0.98, 1.02) for _ in range(30)]
     return {
         "Ticker": ticker, "Prix": prices[-1], 
         "Change": (prices[-1]-prices[0])/prices[0]*100,
         "History": pd.DataFrame({"Close": prices}),
-        "Sector": "Simulated Tech",
-        "Micro": {"Market Cap": "100B", "PE Ratio": "25.4", "Profit Margin": "15%", "Revenue YoY": "+10%"},
-        "Score": 75, "Verdict": "BUY (SIM)", "Thesis": "Strong momentum in simulation.", "Risque": "Simulation",
-        "Source": "⚠️ Simulation"
+        "Sector": "Technology (Simulated)",
+        "Micro": {"Market Cap": "Simulated", "PE Ratio": "25.0", "Beta": "1.2", "Volume": "10M"},
+        "Score": 75, "Verdict": "BUY (SIM)", "Thesis": "Simulation (Vérifiez votre clé API FMP).", "Risque": "Simulation",
+        "Source": "⚠️ Simulation (Clé API Manquante)"
     }
 
-@st.cache_data(ttl=600)
-def analyze_stock_pro(ticker):
-    ticker = ticker.strip().upper()
+# --- 5. CHAT ENGINE ---
+def chat_with_analyst(ticker, data, user_message):
     try:
-        time.sleep(random.uniform(0.5, 1.5)) # Anti-ban léger
-        stock = yf.Ticker(ticker)
-        hist = stock.history(period="3mo")
-        if hist.empty: raise Exception("Yahoo Empty")
+        if not client: return "❌ OpenAI Key manquante."
+        context = f"Action: {ticker}. Prix: {data['Prix']}. Thèse: {data['Thesis']}. Description: {data['Micro'].get('Description', 'N/A')}"
         
-        info = stock.info
-        current = hist['Close'].iloc[-1]
-        prev = hist['Close'].iloc[0]
+        history = st.session_state['chat_history'].get(ticker, [])
+        messages = [{"role": "system", "content": f"Tu es un expert financier. Contexte: {context}"}]
+        for msg in history[-6:]: messages.append({"role": msg["role"], "content": msg["content"]})
+        messages.append({"role": "user", "content": user_message})
         
-        micro = {
-            "Market Cap": f"{info.get('marketCap', 0)/1e9:.1f}B",
-            "PE Ratio": f"{info.get('trailingPE', 0):.1f}",
-            "PEG": f"{info.get('pegRatio', 0):.2f}",
-            "EPS": f"{info.get('trailingEps', 0):.2f}",
-            "Div Yield": f"{info.get('dividendYield', 0)*100:.2f}%" if info.get('dividendYield') else "0%",
-            "Beta": f"{info.get('beta', 0):.2f}",
-            "Profit Margin": f"{info.get('profitMargins', 0)*100:.1f}%",
-            "Revenue YoY": f"{info.get('revenueGrowth', 0)*100:.1f}%"
-        }
-        
-        # IA Analysis
-        try:
-            if not client: raise Exception("No Key")
-            prompt = f"Analyze {ticker}. Price {current}. Json output: {{'verdict': 'BUY/HOLD/SELL', 'score': 75, 'thesis': 'short sentence', 'risk': '1 word'}}"
-            resp = client.chat.completions.create(model="gpt-3.5-turbo", messages=[{"role": "user", "content": prompt}])
-            ai_data = extract_json_safe(resp.choices[0].message.content)
-            
-            return {
-                "Ticker": ticker, "Prix": current, "Change": ((current-prev)/prev)*100,
-                "History": hist, "Sector": info.get('sector', 'N/A'), "Micro": micro,
-                "Score": ai_data.get('score', 50), "Verdict": ai_data.get('verdict', 'NEUTRE'),
-                "Thesis": ai_data.get('thesis', 'N/A'), "Risque": ai_data.get('risk', 'N/A'),
-                "Source": "✅ Données Réelles"
-            }
-        except:
-            return {**generate_rich_mock_data(ticker), "Source": "⚠️ Yahoo (No IA)"}
-            
-    except:
-        return generate_rich_mock_data(ticker)
+        response = client.chat.completions.create(model="gpt-3.5-turbo", messages=messages)
+        return response.choices[0].message.content
+    except Exception as e: return f"Erreur: {e}"
 
-# --- 5. INTERFACE ---
-
+# --- 6. INTERFACE ---
 col1, col2, col3, col4 = st.columns(4)
-col1.metric("S&P 500", "4890", "+0.45%")
-col2.metric("NASDAQ", "15450", "+0.80%")
-col3.metric("EUR/USD", "1.08", "-0.12%")
-col4.metric("BTC", "64230", "+2.40%")
-st.divider()
+col1.metric("API Status", "En Ligne" if fmp_key != "DEMO" else "Mode Démo", border=True)
 
 with st.sidebar:
-    st.title("🦅 HUNTER V17.1")
-    st.caption("Stable + Chat Fix")
+    st.title("🦅 HUNTER V18")
+    st.caption("Pro API Edition")
+    if fmp_key == "DEMO": st.warning("⚠️ Clé FMP manquante. Utilisez .env")
     
-    input_tickers = st.text_area("Watchlist", "NVDA PLTR")
+    input_tickers = st.text_area("Watchlist", "AAPL MSFT GOOGL") # AAPL marche souvent sans clé
     raw_tickers = [t.strip().upper() for t in input_tickers.replace(',',' ').split() if t.strip()]
-    tickers = list(dict.fromkeys(raw_tickers)) # Dédoublonnage
+    tickers = list(dict.fromkeys(raw_tickers))
     
-    st.markdown("---")
-    
-    # CORRECTION : Le bouton active une variable de session persistante
     if st.button("RUN ANALYSIS 🚀", type="primary", use_container_width=True):
         st.session_state['analysis_active'] = True
 
-    export_placeholder = st.empty()
-
-# CORRECTION : On vérifie la variable persistante, pas juste le bouton
 if st.session_state['analysis_active'] and tickers:
-    report_data = []
-    
     for t in tickers:
-        data = analyze_stock_pro(t)
+        data = analyze_stock_real(t)
         
         with st.container(border=True):
-            # Header & Metrics
+            # Header
             c1, c2, c3 = st.columns([2, 4, 2])
             c1.markdown(f"## {data['Ticker']}"); c1.caption(data['Sector'])
             c2.metric("Prix", f"{data['Prix']:.2f} $", f"{data['Change']:.2f} %", delta_color="normal" if data['Change']>0 else "inverse")
             c3.metric("Score", f"{data['Score']}/100", data['Verdict'])
             c3.markdown(render_score_bar(data['Score']), unsafe_allow_html=True)
             
-            # Financials Grid
-            st.markdown("#### 🔢 Financials")
+            # Financials
+            st.markdown("#### 📊 Données Fondamentales")
             m = data['Micro']
             f1, f2, f3, f4 = st.columns(4)
             f1.metric("Mkt Cap", m.get('Market Cap'), border=True)
-            f2.metric("PE Ratio", m.get('PE Ratio'), border=True)
-            f3.metric("Margin", m.get('Profit Margin'), border=True)
-            f4.metric("Beta", m.get('Beta'), border=True)
+            f2.metric("Beta", m.get('Beta'), border=True)
+            f3.metric("Vol. Moy", m.get('Volume'), border=True)
+            f4.metric("Industrie", m.get('Industry')[:15]+"...", help=m.get('Industry'), border=True)
             
-            # Chart & Thesis
-            st.markdown("---")
-            g1, g2 = st.columns([2, 1])
-            g1.area_chart(data['History']['Close'], height=200, color="#29b5e8")
-            with g2:
-                st.info(data['Thesis'])
-                st.write(f"**Risque:** {data['Risque']}")
-                if "Simulation" in data['Source']: st.caption("⚠️ Simulation")
+            # Description (Nouvelle Feature API Pro !)
+            with st.expander("🏢 Profil Société"):
+                st.write(m.get('Description'))
+                st.caption(f"CEO: {m.get('CEO')} | Site: {m.get('Website')}")
 
-            # --- CHAT STABLE ---
-            with st.expander(f"💬 Discuter avec l'Analyste [{data['Ticker']}]"):
-                # Init history
-                if data['Ticker'] not in st.session_state['chat_history']:
-                    st.session_state['chat_history'][data['Ticker']] = []
+            # Chart
+            st.markdown("---")
+            if data['History'] is not None and not data['History'].empty:
+                st.area_chart(data['History']['Close'], height=200, color="#29b5e8")
+            
+            # Thesis
+            st.info(data['Thesis'])
+            if "Simulation" in data['Source']: st.caption("⚠️ " + data['Source'])
+            else: st.caption("🌟 Données Certifiées FMP")
+
+            # Chat
+            with st.expander(f"💬 Chat Analyste [{data['Ticker']}]"):
+                if data['Ticker'] not in st.session_state['chat_history']: st.session_state['chat_history'][data['Ticker']] = []
+                for msg in st.session_state['chat_history'][data['Ticker']]: st.chat_message(msg["role"]).write(msg["content"])
                 
-                # A. Affichage Historique
-                for msg in st.session_state['chat_history'][data['Ticker']]:
-                    st.chat_message(msg["role"]).write(msg["content"])
-                
-                # B. Input & Traitement
-                if prompt := st.chat_input("Posez une question...", key=f"chat_{data['Ticker']}"):
-                    # Affiche User
+                if prompt := st.chat_input("Question...", key=f"chat_{data['Ticker']}"):
                     st.chat_message("user").write(prompt)
                     st.session_state['chat_history'][data['Ticker']].append({"role": "user", "content": prompt})
-                    
-                    # Génère et Affiche AI
                     with st.chat_message("assistant"):
-                        with st.spinner("Analyse..."):
-                            response = chat_with_analyst(data['Ticker'], data, prompt)
-                            st.write(response)
-                            st.session_state['chat_history'][data['Ticker']].append({"role": "assistant", "content": response})
-
-        # Data for Export
-        report_data.append({"Ticker": t, "Price": data['Prix'], "Score": data['Score'], "Verdict": data['Verdict']})
-
-    # Export Button
-    if report_data:
-        df = pd.DataFrame(report_data)
-        csv = df.to_csv(index=False).encode('utf-8')
-        with export_placeholder.container():
-            st.success("✅ Terminée")
-            st.download_button("📥 CSV Report", csv, "report.csv", "text/csv")
+                        with st.spinner("..."):
+                            resp = chat_with_analyst(data['Ticker'], data, prompt)
+                            st.write(resp)
+                            st.session_state['chat_history'][data['Ticker']].append({"role": "assistant", "content": resp})
