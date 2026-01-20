@@ -12,7 +12,7 @@ import re
 # --- 1. CONFIGURATION TERMINAL ---
 st.set_page_config(
     layout="wide", 
-    page_title="AI Strategic Hunter v17",
+    page_title="AI Strategic Hunter v17.1",
     page_icon="🦅",
     initial_sidebar_state="expanded"
 )
@@ -28,7 +28,6 @@ st.markdown("""
         border-color: #4CAF50;
         color: #4CAF50;
     }
-    /* Score Bar Custom Styles */
     .score-bar {
         width: 100%;
         height: 8px;
@@ -44,7 +43,6 @@ st.markdown("""
     .score-red { background: linear-gradient(90deg, #ff4444, #cc0000); }
     .score-orange { background: linear-gradient(90deg, #ff9933, #ff6600); }
     .score-green { background: linear-gradient(90deg, #00ff88, #00cc66); }
-    /* Chat Styling */
     .stChatMessage {
         background-color: #1a1a1a;
         border-left: 3px solid #29b5e8;
@@ -82,190 +80,96 @@ if not check_password(): st.stop()
 api_key = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=api_key) if api_key else None
 
-# --- INIT CHAT STATE (v16) ---
+# --- INIT STATE ---
 if 'chat_history' not in st.session_state:
     st.session_state['chat_history'] = {}
 
-# --- 2. UTILITAIRES DE SÉCURITÉ ---
+# CORRECTION DU BUG "BOUTON OUBLIEUX"
+if 'analysis_active' not in st.session_state:
+    st.session_state['analysis_active'] = False
+
+# --- 2. UTILITAIRES ---
 
 def extract_json_safe(text):
-    """
-    Extraction sécurisée du JSON depuis la réponse OpenAI.
-    Gère les cas où l'IA ajoute du texte avant/après le JSON.
-    """
+    """Extraction sécurisée du JSON"""
     try:
-        # Tentative 1 : Parse direct
         return json.loads(text)
     except:
         try:
-            # Tentative 2 : Extraction par regex du premier objet JSON trouvé
             match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', text)
-            if match:
-                json_str = match.group(0)
-                return json.loads(json_str)
-            else:
-                raise Exception("No JSON found")
+            if match: return json.loads(match.group(0))
+            else: raise Exception("No JSON")
         except:
-            # Tentative 3 : Recherche manuelle des accolades
-            try:
-                start = text.index('{')
-                end = text.rindex('}') + 1
-                return json.loads(text[start:end])
-            except:
-                # Échec total -> Retourne un objet vide pour déclencher le fallback
-                return {}
+            return {}
 
 def render_score_bar(score):
-    """
-    Génère une barre de progression HTML colorée selon le score.
-    Rouge < 50, Orange < 70, Vert >= 70
-    """
-    if score < 50:
-        color_class = "score-red"
-    elif score < 70:
-        color_class = "score-orange"
-    else:
-        color_class = "score-green"
-    
-    html = f"""
-    <div class="score-bar">
-        <div class="score-fill {color_class}" style="width: {score}%"></div>
-    </div>
-    """
-    return html
+    if score < 50: color = "score-red"
+    elif score < 70: color = "score-orange"
+    else: color = "score-green"
+    return f'<div class="score-bar"><div class="score-fill {color}" style="width: {score}%"></div></div>'
 
-# --- 3. MOTEUR DE CHAT CONTEXTUEL (v17 - Pattern Standard) ---
+# --- 3. MOTEUR CHAT (RAG) ---
 
 def build_context_prompt(ticker, data):
-    """
-    Construit un system prompt enrichi avec toutes les données de l'analyse.
-    Ce contexte sera invisible pour l'utilisateur mais guidera l'IA.
-    """
     micro = data['Micro']
-    context = f"""Tu es un analyste financier expert spécialisé sur l'action {ticker}.
+    return f"""Analyste expert sur {ticker}.
+CONTEXTE:
+- Prix: ${data['Prix']:.2f} ({data['Change']:.2f}%)
+- Score: {data['Score']}/100 ({data['Verdict']})
+- Thèse: {data['Thesis']}
+- Risque: {data['Risque']}
+- PE: {micro.get('PE Ratio')} | Marge: {micro.get('Profit Margin')} | Growth: {micro.get('Revenue YoY')}
+DIRECTIVES: Réponse courte, style Bloomberg. Base-toi sur ces chiffres."""
 
-DONNÉES DE L'ANALYSE EN COURS :
-- Ticker: {ticker}
-- Secteur: {data['Sector']}
-- Prix Actuel: ${data['Prix']:.2f}
-- Variation: {data['Change']:.2f}%
-- Score IA: {data['Score']}/100
-- Verdict: {data['Verdict']}
-- Thèse d'Investissement: {data['Thesis']}
-- Risque Principal: {data['Risque']}
-
-MÉTRIQUES FINANCIÈRES :
-- Market Cap: {micro.get('Market Cap')}
-- PE Ratio: {micro.get('PE Ratio')}
-- PEG Ratio: {micro.get('PEG')}
-- EPS: {micro.get('EPS')}
-- Dividend Yield: {micro.get('Div Yield')}
-- Beta: {micro.get('Beta')}
-- Profit Margin: {micro.get('Profit Margin')}
-- Revenue Growth YoY: {micro.get('Revenue YoY')}
-
-SOURCE DES DONNÉES: {data['Source']}
-
-DIRECTIVES :
-- Réponds de manière concise et professionnelle (style Bloomberg Terminal).
-- Utilise les données ci-dessus pour répondre aux questions de l'utilisateur.
-- Si la question sort du cadre de cette analyse, indique-le poliment.
-- Ne jamais inventer de données : base-toi uniquement sur le contexte fourni.
-- Si les données sont simulées (Source contains "Simulation"), mentionne-le si pertinent.
-"""
-    return context
-
-def get_ai_response(ticker, data, user_message, chat_history):
-    """
-    Génère une réponse de l'IA avec le contexte complet.
-    Retourne la réponse ou un message d'erreur.
-    """
+def chat_with_analyst(ticker, data, user_message):
     try:
-        if not client:
-            return "❌ Service d'analyse indisponible (clé API manquante)."
+        if not client: return "❌ API Key manquante."
         
-        # Construction du contexte
         system_prompt = build_context_prompt(ticker, data)
+        history = st.session_state['chat_history'].get(ticker, [])
         
-        # Construction des messages pour l'API
         messages = [{"role": "system", "content": system_prompt}]
-        
-        # Ajout de l'historique (max 10 derniers messages)
-        for msg in chat_history[-10:]:
+        for msg in history[-6:]: # Contexte court
             messages.append({"role": msg["role"], "content": msg["content"]})
-        
-        # Ajout du nouveau message utilisateur
         messages.append({"role": "user", "content": user_message})
         
-        # Appel API
         response = client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=messages,
-            max_tokens=500,
+            max_tokens=300,
             temperature=0.7
         )
-        
         return response.choices[0].message.content
-        
     except Exception as e:
-        return f"❌ Service temporairement indisponible. Erreur: {str(e)[:100]}"
+        return f"❌ Erreur IA: {str(e)[:50]}"
 
-# --- 4. MOTEUR DE DONNÉES ---
+# --- 4. DATA ENGINE (FALLBACK) ---
 
 def generate_rich_mock_data(ticker):
-    """Données de simulation riches (Fallback Mode)"""
     base = random.uniform(50, 800)
-    prices = [base]
-    for _ in range(50): 
-        prices.append(prices[-1] * random.uniform(0.98, 1.02))
-    
-    micro = {
-        "Market Cap": f"{random.uniform(50, 2000):.1f}B",
-        "PE Ratio": f"{random.uniform(15, 80):.1f}",
-        "PEG": f"{random.uniform(0.8, 3.0):.2f}",
-        "EPS": f"{random.uniform(2, 15):.2f}",
-        "Div Yield": f"{random.uniform(0, 4):.2f}%",
-        "Beta": f"{random.uniform(0.8, 2.5):.2f}",
-        "Profit Margin": f"{random.uniform(10, 40):.1f}%",
-        "Revenue YoY": f"+{random.uniform(5, 50):.1f}%"
-    }
-    
+    prices = [base * random.uniform(0.98, 1.02) for _ in range(30)]
     return {
-        "Ticker": ticker,
-        "Prix": prices[-1],
-        "Change": (prices[-1] - prices[0]) / prices[0] * 100,
+        "Ticker": ticker, "Prix": prices[-1], 
+        "Change": (prices[-1]-prices[0])/prices[0]*100,
         "History": pd.DataFrame({"Close": prices}),
-        "Sector": "Technology (Simulated)",
-        "Micro": micro,
-        "Score": random.randint(40, 95),
-        "Verdict": "ACHAT (SIMULÉ)",
-        "Thesis": f"Simulation : {ticker} présente une opportunité technique intéressante dans un contexte de volatilité maîtrisée.",
-        "Risque": "Volatilité API",
+        "Sector": "Simulated Tech",
+        "Micro": {"Market Cap": "100B", "PE Ratio": "25.4", "Profit Margin": "15%", "Revenue YoY": "+10%"},
+        "Score": 75, "Verdict": "BUY (SIM)", "Thesis": "Strong momentum in simulation.", "Risque": "Simulation",
         "Source": "⚠️ Simulation"
     }
 
 @st.cache_data(ttl=600)
 def analyze_stock_pro(ticker):
-    """
-    Analyse principale avec Graceful Degradation.
-    v15+ : Throttling Yahoo et parsing JSON sécurisé.
-    """
     ticker = ticker.strip().upper()
-    
     try:
-        # ANTI-BAN : Throttling aléatoire (1-2 secondes)
-        time.sleep(random.uniform(1.0, 2.0))
-        
+        time.sleep(random.uniform(0.5, 1.5)) # Anti-ban léger
         stock = yf.Ticker(ticker)
         hist = stock.history(period="3mo")
+        if hist.empty: raise Exception("Yahoo Empty")
+        
         info = stock.info
-        
-        if hist.empty: 
-            raise Exception("Yahoo Empty")
-        
         current = hist['Close'].iloc[-1]
         prev = hist['Close'].iloc[0]
-        change = ((current - prev) / prev) * 100
         
         micro = {
             "Market Cap": f"{info.get('marketCap', 0)/1e9:.1f}B",
@@ -278,205 +182,114 @@ def analyze_stock_pro(ticker):
             "Revenue YoY": f"{info.get('revenueGrowth', 0)*100:.1f}%"
         }
         
-        # ANALYSE IA (avec parsing JSON sécurisé)
+        # IA Analysis
         try:
-            if not client: 
-                raise Exception("No Key")
+            if not client: raise Exception("No Key")
+            prompt = f"Analyze {ticker}. Price {current}. Json output: {{'verdict': 'BUY/HOLD/SELL', 'score': 75, 'thesis': 'short sentence', 'risk': '1 word'}}"
+            resp = client.chat.completions.create(model="gpt-3.5-turbo", messages=[{"role": "user", "content": prompt}])
+            ai_data = extract_json_safe(resp.choices[0].message.content)
             
-            prompt = f"Analyse flash {ticker}. Prix {current}. Secteur {info.get('sector')}. Output JSON strict: {{'verdict': 'BUY/HOLD/SELL', 'score': 75, 'thesis': '1 phrase', 'risk': '1 mot'}}"
+            return {
+                "Ticker": ticker, "Prix": current, "Change": ((current-prev)/prev)*100,
+                "History": hist, "Sector": info.get('sector', 'N/A'), "Micro": micro,
+                "Score": ai_data.get('score', 50), "Verdict": ai_data.get('verdict', 'NEUTRE'),
+                "Thesis": ai_data.get('thesis', 'N/A'), "Risque": ai_data.get('risk', 'N/A'),
+                "Source": "✅ Données Réelles"
+            }
+        except:
+            return {**generate_rich_mock_data(ticker), "Source": "⚠️ Yahoo (No IA)"}
             
-            response = client.chat.completions.create(
-                model="gpt-3.5-turbo", 
-                messages=[{"role": "user", "content": prompt}]
-            )
-            
-            # PARSING SÉCURISÉ
-            raw_text = response.choices[0].message.content
-            ai_data = extract_json_safe(raw_text)
-            
-            # Validation des clés essentielles
-            if not all(k in ai_data for k in ['verdict', 'score', 'thesis', 'risk']):
-                raise Exception("Incomplete JSON")
-            
-            verdict = ai_data.get('verdict')
-            thesis = ai_data.get('thesis')
-            score = ai_data.get('score')
-            risk = ai_data.get('risk')
-            source = "✅ Données Réelles"
-            
-        except Exception as e:
-            # FALLBACK IA (pas de crash)
-            verdict = "NEUTRE"
-            thesis = "Analyse technique seule (IA indisponible)."
-            score = 50
-            risk = "N/A"
-            source = "⚠️ Yahoo (No IA)"
-
-        return {
-            "Ticker": ticker, 
-            "Prix": current, 
-            "Change": change,
-            "History": hist, 
-            "Sector": info.get('sector', 'N/A'),
-            "Micro": micro, 
-            "Score": score, 
-            "Verdict": verdict,
-            "Thesis": thesis, 
-            "Risque": risk, 
-            "Source": source
-        }
-
-    except Exception:
-        # FALLBACK TOTAL (Mode Simulation)
+    except:
         return generate_rich_mock_data(ticker)
 
-# --- 5. INTERFACE TERMINAL ---
+# --- 5. INTERFACE ---
 
-# BANDEAU MACRO
-col_t1, col_t2, col_t3, col_t4 = st.columns(4)
-with col_t1: st.metric("S&P 500", "4,890.23", "+0.45%")
-with col_t2: st.metric("NASDAQ", "15,450.10", "+0.80%")
-with col_t3: st.metric("EUR/USD", "1.0850", "-0.12%")
-with col_t4: st.metric("BTC/USD", "64,230.00", "+2.40%")
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("S&P 500", "4890", "+0.45%")
+col2.metric("NASDAQ", "15450", "+0.80%")
+col3.metric("EUR/USD", "1.08", "-0.12%")
+col4.metric("BTC", "64230", "+2.40%")
 st.divider()
 
-# SIDEBAR (Contrôles)
 with st.sidebar:
-    st.title("🦅 HUNTER V17")
-    st.caption("Stable Edition")
+    st.title("🦅 HUNTER V17.1")
+    st.caption("Stable + Chat Fix")
     
-    input_tickers = st.text_area("Watchlist", "NVDA PLTR AMD")
-    
-    # DÉDOUBLONNAGE STRICT v17 : Préserve l'ordre + Normalisation
+    input_tickers = st.text_area("Watchlist", "NVDA PLTR")
     raw_tickers = [t.strip().upper() for t in input_tickers.replace(',',' ').split() if t.strip()]
-    tickers = list(dict.fromkeys(raw_tickers))  # Élimine doublons en gardant l'ordre
+    tickers = list(dict.fromkeys(raw_tickers)) # Dédoublonnage
     
     st.markdown("---")
-    run_btn = st.button("RUN ANALYSIS 🚀", type="primary", use_container_width=True)
     
-    # Placeholder pour le bouton d'export
+    # CORRECTION : Le bouton active une variable de session persistante
+    if st.button("RUN ANALYSIS 🚀", type="primary", use_container_width=True):
+        st.session_state['analysis_active'] = True
+
     export_placeholder = st.empty()
 
-# MAIN CONTENT
-if run_btn and tickers:
+# CORRECTION : On vérifie la variable persistante, pas juste le bouton
+if st.session_state['analysis_active'] and tickers:
     report_data = []
     
     for t in tickers:
         data = analyze_stock_pro(t)
         
-        # CARD DESIGN (Bloomberg Terminal Style)
         with st.container(border=True):
-            # HEADER
-            c_head1, c_head2, c_head3 = st.columns([2, 4, 2])
-            with c_head1:
-                st.markdown(f"## {data['Ticker']}")
-                st.caption(data['Sector'])
-            with c_head2:
-                delta_color = "normal" if data['Change'] > 0 else "inverse"
-                st.metric("Prix Actuel", f"{data['Prix']:.2f} $", f"{data['Change']:.2f} %", delta_color=delta_color)
-            with c_head3:
-                st.metric("AI Score", f"{data['Score']}/100", data['Verdict'])
-                st.markdown(render_score_bar(data['Score']), unsafe_allow_html=True)
-
-            st.markdown("#### 🔢 Key Financials")
-            m = data['Micro']
+            # Header & Metrics
+            c1, c2, c3 = st.columns([2, 4, 2])
+            c1.markdown(f"## {data['Ticker']}"); c1.caption(data['Sector'])
+            c2.metric("Prix", f"{data['Prix']:.2f} $", f"{data['Change']:.2f} %", delta_color="normal" if data['Change']>0 else "inverse")
+            c3.metric("Score", f"{data['Score']}/100", data['Verdict'])
+            c3.markdown(render_score_bar(data['Score']), unsafe_allow_html=True)
             
-            # REFONTE UI : Metrics compactes
-            k1, k2, k3, k4 = st.columns(4)
-            with k1: 
-                st.metric("Market Cap", m.get('Market Cap'), border=True)
-                st.metric("Beta", m.get('Beta'), border=True)
-            with k2: 
-                st.metric("PE Ratio", m.get('PE Ratio'), border=True)
-                st.metric("EPS", m.get('EPS'), border=True)
-            with k3: 
-                st.metric("Profit Margin", m.get('Profit Margin'), border=True)
-                st.metric("Revenue YoY", m.get('Revenue YoY'), border=True)
-            with k4: 
-                st.metric("PEG Ratio", m.get('PEG'), border=True)
-                st.metric("Div Yield", m.get('Div Yield'), border=True)
-
+            # Financials Grid
+            st.markdown("#### 🔢 Financials")
+            m = data['Micro']
+            f1, f2, f3, f4 = st.columns(4)
+            f1.metric("Mkt Cap", m.get('Market Cap'), border=True)
+            f2.metric("PE Ratio", m.get('PE Ratio'), border=True)
+            f3.metric("Margin", m.get('Profit Margin'), border=True)
+            f4.metric("Beta", m.get('Beta'), border=True)
+            
+            # Chart & Thesis
             st.markdown("---")
             g1, g2 = st.columns([2, 1])
-            with g1: 
-                st.area_chart(data['History']['Close'], height=200, color="#29b5e8")
+            g1.area_chart(data['History']['Close'], height=200, color="#29b5e8")
             with g2:
                 st.info(data['Thesis'])
                 st.write(f"**Risque:** {data['Risque']}")
-                if "Simulation" in data['Source']: 
-                    st.caption("⚠️ Simulation Mode")
+                if "Simulation" in data['Source']: st.caption("⚠️ Simulation")
 
-            # --- MODULE DE CHAT CONTEXTUEL (v17 - PATTERN STANDARD) ---
+            # --- CHAT STABLE ---
             with st.expander(f"💬 Discuter avec l'Analyste [{data['Ticker']}]"):
-                st.caption("Posez vos questions sur cette analyse. L'IA connaît toutes les métriques affichées ci-dessus.")
-                
-                # Initialisation de l'historique pour ce ticker
+                # Init history
                 if data['Ticker'] not in st.session_state['chat_history']:
                     st.session_state['chat_history'][data['Ticker']] = []
                 
-                # ÉTAPE 1 : Afficher l'historique existant
-                for message in st.session_state['chat_history'][data['Ticker']]:
-                    with st.chat_message(message["role"]):
-                        st.write(message["content"])
+                # A. Affichage Historique
+                for msg in st.session_state['chat_history'][data['Ticker']]:
+                    st.chat_message(msg["role"]).write(msg["content"])
                 
-                # ÉTAPE 2 : Capturer le nouveau message (PATTERN STANDARD)
-                if prompt := st.chat_input(
-                    f"Ex: Pourquoi le PE est si élevé pour {data['Ticker']} ?",
-                    key=f"chat_input_{data['Ticker']}"
-                ):
-                    # ÉTAPE 3 : Afficher immédiatement le message utilisateur
-                    with st.chat_message("user"):
-                        st.write(prompt)
+                # B. Input & Traitement
+                if prompt := st.chat_input("Posez une question...", key=f"chat_{data['Ticker']}"):
+                    # Affiche User
+                    st.chat_message("user").write(prompt)
+                    st.session_state['chat_history'][data['Ticker']].append({"role": "user", "content": prompt})
                     
-                    # ÉTAPE 4 : Générer et afficher la réponse assistant
+                    # Génère et Affiche AI
                     with st.chat_message("assistant"):
-                        with st.spinner("Analyse en cours..."):
-                            response = get_ai_response(
-                                data['Ticker'], 
-                                data, 
-                                prompt, 
-                                st.session_state['chat_history'][data['Ticker']]
-                            )
-                        st.write(response)
-                    
-                    # ÉTAPE 5 : Sauvegarder dans session_state À LA FIN
-                    st.session_state['chat_history'][data['Ticker']].append({
-                        "role": "user",
-                        "content": prompt
-                    })
-                    st.session_state['chat_history'][data['Ticker']].append({
-                        "role": "assistant",
-                        "content": response
-                    })
-                    
-                    # PAS DE st.rerun() - Laisse Streamlit gérer le flux naturel
+                        with st.spinner("Analyse..."):
+                            response = chat_with_analyst(data['Ticker'], data, prompt)
+                            st.write(response)
+                            st.session_state['chat_history'][data['Ticker']].append({"role": "assistant", "content": response})
 
-        # Ajout des données au rapport CSV
-        report_data.append({
-            "Ticker": t,
-            "Price": f"{data['Prix']:.2f}",
-            "Change %": f"{data['Change']:.2f}",
-            "Verdict": data['Verdict'],
-            "Score": data['Score'],
-            "Thesis": data['Thesis'],
-            "PE Ratio": data['Micro'].get('PE Ratio'),
-            "Source": data['Source']
-        })
+        # Data for Export
+        report_data.append({"Ticker": t, "Price": data['Prix'], "Score": data['Score'], "Verdict": data['Verdict']})
 
-    # --- GÉNÉRATION DU RAPPORT (SIDEBAR) ---
+    # Export Button
     if report_data:
         df = pd.DataFrame(report_data)
         csv = df.to_csv(index=False).encode('utf-8')
-        
         with export_placeholder.container():
-            st.success("✅ Analyse Terminée")
-            st.download_button(
-                label="📥 TÉLÉCHARGER RAPPORT (CSV)",
-                data=csv,
-                file_name=f"Hunter_Report_{datetime.date.today()}.csv",
-                mime="text/csv",
-            )
-            
-            st.markdown("---")
-            st.markdown("**📧 Email Briefing:**")
-            st.code(f"Analyse terminée sur {len(tickers)} actifs. Tendance globale: {'Haussière' if df['Change %'].astype(float).mean() > 0 else 'Mixte'}. Top pick: {df.loc[df['Score'].idxmax()]['Ticker']}.", language="text")
+            st.success("✅ Terminée")
+            st.download_button("📥 CSV Report", csv, "report.csv", "text/csv")
