@@ -1,4 +1,3 @@
-
 import streamlit as st
 import os
 import time
@@ -14,7 +13,7 @@ import requests
 # --- 1. CONFIGURATION TERMINAL ---
 st.set_page_config(
     layout="wide", 
-    page_title="AI Strategic Hunter v19",
+    page_title="AI Strategic Hunter v20",
     page_icon="🦅",
     initial_sidebar_state="expanded"
 )
@@ -780,9 +779,24 @@ if st.session_state['results']:
             with c_head2:
                 delta_color = "normal" if data['Change'] > 0 else "inverse"
                 st.metric("Prix Actuel", f"{data['Prix']:.2f} $", f"{data['Change']:.2f} %", delta_color=delta_color)
+            
+            # --- MODIFICATION ICI : FORCE LA FLECHE VISUELLE ---
             with c_head3:
-                st.metric("AI Score", f"{data['Score']}/100", data['Verdict'])
+                rec = data['Verdict']
+                # Logique: SELL = Fleche Bas + Rouge (Inverse), BUY = Fleche Haut + Vert (Normal)
+                if "SELL" in rec.upper():
+                    verdict_color = "inverse"
+                    rec_display = f"▼ {rec}"  # Force l'icône BAS
+                elif "BUY" in rec.upper():
+                    verdict_color = "normal"
+                    rec_display = f"▲ {rec}"  # Force l'icône HAUT
+                else:
+                    verdict_color = "off"
+                    rec_display = rec
+                    
+                st.metric("AI Score", f"{data['Score']}/100", rec_display, delta_color=verdict_color)
                 st.markdown(render_score_bar(data['Score']), unsafe_allow_html=True)
+            # ---------------------------------------------
 
             st.markdown("#### 🔢 Key Financials")
             m = data['Micro']
