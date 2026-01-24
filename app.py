@@ -88,12 +88,112 @@ if not check_password(): st.stop()
 api_key = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=api_key) if api_key else None
 
-# --- INIT STATE (v19 - PERSISTENCE) ---
+# --- INIT STATE (v20 - PERSONAS) ---
 if 'chat_history' not in st.session_state:
     st.session_state['chat_history'] = {}
 
 if 'results' not in st.session_state:
     st.session_state['results'] = None
+
+if 'selected_persona' not in st.session_state:
+    st.session_state['selected_persona'] = "Warren"
+
+# --- PERSONAS CONFIGURATION (v20) ---
+PERSONAS = {
+    "Warren": {
+        "name": "Warren (Value & Sécurité)",
+        "emoji": "🔰",
+        "description": "Investisseur prudent focalisé sur la valeur intrinsèque",
+        "system_prompt_addition": """
+TU ES WARREN BUFFETT - L'ORACLE D'OMAHA
+
+PHILOSOPHIE D'INVESTISSEMENT :
+- Tu cherches des entreprises sous-évaluées avec un 'moat' (avantage concurrentiel durable).
+- PE Ratio : Critique au-delà de 25. Au-delà de 40, c'est un red flag majeur.
+- Cash Flow : C'est le ROI qui compte, pas les promesses de croissance.
+- Dette : Tu détestes la dette excessive. Debt-to-Equity > 2 = danger.
+- Dividendes : Signe de maturité et de santé financière.
+- Volatilité (Beta) : Tu préfères Beta < 1.2 (stabilité).
+
+TON ET STYLE :
+- Cynique et pragmatique. Tu n'es pas impressionné par le "hype".
+- Phrases types : "Le prix est ce que vous payez, la valeur est ce que vous obtenez."
+- Tu recommandes HOLD ou SELL plus souvent que BUY.
+- Score : Rarement au-dessus de 70 sauf si valeur exceptionnelle.
+
+CRITÈRES DE VERDICT :
+- BUY : PE < 20, marges solides, historique de profits, dividendes.
+- HOLD : PE 20-30, financials corrects mais pas d'opportunité exceptionnelle.
+- SELL : PE > 40, pertes chroniques, hype sans substance, Beta > 1.5.
+""",
+        "risk_keywords": ["Surévaluation", "Spéculation", "Volatilité"]
+    },
+    "Cathie": {
+        "name": "Cathie (Growth & Innovation)",
+        "emoji": "🚀",
+        "description": "Chasseuse de licornes tech et d'innovation disruptive",
+        "system_prompt_addition": """
+TU ES CATHIE WOOD - LA VISIONNAIRE DE L'INNOVATION
+
+PHILOSOPHIE D'INVESTISSEMENT :
+- Tu cherches les entreprises qui vont changer le monde dans 5-10 ans.
+- Revenue Growth : C'est le métrique #1. +30% YoY = excellent signal.
+- PE Ratio : Non pertinent pour les disrupteurs. Tesla a un PE de 100+ et c'est normal.
+- Secteurs favoris : IA, Robotique, Biotech, Fintech, Cleantech, Blockchain.
+- Pertes actuelles : Acceptables si la croissance est explosive.
+- R&D Investment : Plus c'est élevé, mieux c'est.
+
+TON ET STYLE :
+- Optimiste et visionnaire. Tu vois le potentiel, pas les obstacles.
+- Phrases types : "L'innovation exponentielle crée des opportunités inimaginables."
+- Tu recommandes BUY ou STRONG BUY fréquemment.
+- Score : Facilement 80-95 pour les secteurs d'innovation.
+
+CRITÈRES DE VERDICT :
+- STRONG BUY : Secteur innovant, Revenue Growth > 40%, R&D élevé.
+- BUY : Growth > 20%, secteur tech/émergent, vision claire.
+- HOLD : Growth < 20%, secteur mature.
+- SELL : Croissance négative, entreprise legacy sans transformation.
+""",
+        "risk_keywords": ["Disruption", "Innovation", "Croissance"]
+    },
+    "Jim": {
+        "name": "Jim (Momentum & Quant)",
+        "emoji": "⚡",
+        "description": "Trader quantitatif basé sur les signaux techniques",
+        "system_prompt_addition": """
+TU ES JIM SIMONS - LE QUANT LÉGENDAIRE
+
+PHILOSOPHIE D'INVESTISSEMENT :
+- Les chiffres ne mentent pas. Tout est dans les patterns et les statistiques.
+- Beta : Métrique clé. Beta > 1.5 = volatilité exploitable pour le trading.
+- Volume : Liquidité = opportunité. Volume faible = danger.
+- Price Action : Momentum récent (Change %) est plus important que les fondamentaux.
+- Corrélations : Tu cherches les anomalies de marché.
+- Timeframe : Court/moyen terme (jours/semaines, pas années).
+
+TON ET STYLE :
+- Froid, analytique, mathématique. Pas d'émotions.
+- Phrases types : "Les probabilités favorisent cette position."
+- Verdicts basés sur des seuils quantitatifs stricts.
+- Score : Calculé sur volatilité + momentum + volume.
+
+CRITÈRES DE VERDICT :
+- BUY : Change% > +5%, Beta > 1.3, Volume élevé (signal momentum haussier).
+- HOLD : Change% entre -2% et +5%, Beta 0.8-1.3 (range trading).
+- SELL : Change% < -5%, Beta < 0.8 (pas de volatilité = pas d'opportunité).
+
+ANALYSE :
+- Tu ignores les "histoires" et les visions long terme.
+- Focus : Beta, Change%, Volume, correlation avec indices.
+""",
+        "risk_keywords": ["Volatilité", "Liquidité", "Momentum"]
+    }
+}
+
+def get_persona_emoji(persona_key):
+    """Retourne l'emoji du persona sélectionné"""
+    return PERSONAS.get(persona_key, {}).get("emoji", "📊")
 
 # --- 2. CONFIGURATION FMP API ---
 def get_fmp_api_key():
@@ -164,14 +264,15 @@ def render_score_bar(score):
 
 # --- 4. MOTEUR DE CHAT CONTEXTUEL ---
 
-def build_context_prompt(ticker, data):
+def build_context_prompt(ticker, data, persona_key="Warren"):
     """
-    Construit un system prompt enrichi avec toutes les données de l'analyse.
+    Construit un system prompt enrichi avec les données de l'analyse.
+    v20 : Intègre la personnalité de l'investisseur sélectionné.
     """
     micro = data['Micro']
-    context = f"""Tu es un analyste financier expert spécialisé sur l'action {ticker}.
-
-DONNÉES DE L'ANALYSE EN COURS :
+    persona = PERSONAS.get(persona_key, PERSONAS["Warren"])
+    
+    base_context = f"""DONNÉES DE L'ANALYSE EN COURS :
 - Ticker: {ticker}
 - Secteur: {data.get('Sector', 'N/A')}
 - Industrie: {data.get('Industry', 'N/A')}
@@ -193,27 +294,35 @@ MÉTRIQUES FINANCIÈRES :
 - Revenue Growth YoY: {micro.get('Revenue YoY')}
 
 SOURCE DES DONNÉES: {data['Source']}
+"""
+    
+    # Ajout de la personnalité
+    persona_instruction = persona['system_prompt_addition']
+    
+    context = f"""{persona_instruction}
+
+{base_context}
 
 DIRECTIVES :
-- Réponds de manière concise et professionnelle (style Bloomberg Terminal).
+- Réponds selon TA personnalité d'investisseur ({persona['name']}).
 - Utilise les données ci-dessus pour répondre aux questions de l'utilisateur.
+- Sois cohérent avec ta philosophie d'investissement.
 - Si la question sort du cadre de cette analyse, indique-le poliment.
 - Ne jamais inventer de données : base-toi uniquement sur le contexte fourni.
-- Si les données sont simulées (Source contains "Simulation"), mentionne-le si pertinent.
 """
     return context
 
-def get_ai_response(ticker, data, user_message, chat_history):
+def get_ai_response(ticker, data, user_message, chat_history, persona_key="Warren"):
     """
     Génère une réponse de l'IA avec le contexte complet.
-    Retourne la réponse ou un message d'erreur.
+    v20 : Prend en compte le persona sélectionné.
     """
     try:
         if not client:
             return "❌ Service d'analyse indisponible (clé API OpenAI manquante)."
         
-        # Construction du contexte
-        system_prompt = build_context_prompt(ticker, data)
+        # Construction du contexte avec persona
+        system_prompt = build_context_prompt(ticker, data, persona_key)
         
         # Construction des messages pour l'API
         messages = [{"role": "system", "content": system_prompt}]
@@ -360,15 +469,18 @@ def generate_rich_mock_data(ticker):
         "Source": "⚠️ Simulation"
     }
 
-def analyze_stock_pro(ticker):
+def analyze_stock_pro(ticker, persona_key="Warren"):
     """
     Analyse principale avec Graceful Degradation.
-    v19.2 : Stratégie HYBRIDE FMP (Prix) + Yahoo (Profil)
+    v20 : Intègre le persona dans l'analyse IA.
     """
     ticker = ticker.strip().upper()
     
     # ANTI-BAN : Throttling aléatoire
     time.sleep(random.uniform(0.5, 1.5))
+    
+    # Récupération du persona
+    persona = PERSONAS.get(persona_key, PERSONAS["Warren"])
     
     # ===== TENTATIVE 1 : STRATÉGIE HYBRIDE (FMP + YAHOO) =====
     hybrid_data = fetch_data_hybrid(ticker)
@@ -400,16 +512,30 @@ def analyze_stock_pro(ticker):
                 "Revenue YoY": "N/A"  # Non disponible dans /quote
             }
             
-            # ANALYSE IA
+            # ANALYSE IA AVEC PERSONA
             try:
                 if not client:
                     raise Exception("No Key")
                 
-                prompt = f"Analyse flash {ticker}. Prix {current}. Secteur {hybrid_data['sector']}. Output JSON strict: {{'verdict': 'BUY/HOLD/SELL', 'score': 75, 'thesis': '1 phrase', 'risk': '1 mot'}}"
+                # Construction du prompt avec la philosophie du persona
+                persona_context = persona['system_prompt_addition']
+                
+                prompt = f"""{persona_context}
+
+Analyse {ticker} selon TA personnalité :
+- Prix: ${current}
+- Change: {change}%
+- Secteur: {hybrid_data['sector']}
+- PE: {hybrid_data['pe']}
+- Beta: {hybrid_data['beta']}
+
+Output JSON strict: {{'verdict': 'BUY/HOLD/SELL', 'score': 75, 'thesis': '1 phrase style {persona['name']}', 'risk': '1 mot de {persona['risk_keywords']}'}}
+"""
                 
                 response = client.chat.completions.create(
                     model="gpt-3.5-turbo",
-                    messages=[{"role": "user", "content": prompt}]
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.8  # Plus de créativité pour les personas
                 )
                 
                 raw_text = response.choices[0].message.content
@@ -422,14 +548,14 @@ def analyze_stock_pro(ticker):
                 thesis = ai_data.get('thesis')
                 score = ai_data.get('score')
                 risk = ai_data.get('risk')
-                source = "🌟 FMP (Prix) + Yahoo (Profil) + OpenAI"
+                source = f"🌟 FMP + Yahoo + {persona['emoji']} {persona_key}"
                 
             except:
                 verdict = "NEUTRE"
-                thesis = "Analyse technique seule (IA indisponible)."
+                thesis = f"Analyse technique seule (IA indisponible, style {persona_key})."
                 score = 50
                 risk = "N/A"
-                source = "🌟 FMP (Prix) + Yahoo (Profil)"
+                source = f"🌟 FMP + Yahoo ({persona['emoji']} {persona_key})"
             
             # Assemblage final du dictionnaire de données
             return {
@@ -447,7 +573,8 @@ def analyze_stock_pro(ticker):
                 "Verdict": verdict,
                 "Thesis": thesis,
                 "Risque": risk,
-                "Source": source
+                "Source": source,
+                "Persona": persona_key  # v20 : Stockage du persona utilisé
             }
             
         except Exception as e:
@@ -478,16 +605,28 @@ def analyze_stock_pro(ticker):
             "Revenue YoY": f"{info.get('revenueGrowth', 0)*100:.1f}%"
         }
         
-        # ANALYSE IA
+        # ANALYSE IA AVEC PERSONA
         try:
             if not client:
                 raise Exception("No Key")
             
-            prompt = f"Analyse flash {ticker}. Prix {current}. Secteur {info.get('sector')}. Output JSON strict: {{'verdict': 'BUY/HOLD/SELL', 'score': 75, 'thesis': '1 phrase', 'risk': '1 mot'}}"
+            persona_context = persona['system_prompt_addition']
+            
+            prompt = f"""{persona_context}
+
+Analyse {ticker} selon TA personnalité :
+- Prix: ${current}
+- Secteur: {info.get('sector')}
+- PE: {info.get('trailingPE', 0)}
+- Revenue Growth: {info.get('revenueGrowth', 0)*100}%
+
+Output JSON strict: {{'verdict': 'BUY/HOLD/SELL', 'score': 75, 'thesis': '1 phrase', 'risk': '1 mot'}}
+"""
             
             response = client.chat.completions.create(
                 model="gpt-3.5-turbo",
-                messages=[{"role": "user", "content": prompt}]
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.8
             )
             
             raw_text = response.choices[0].message.content
@@ -500,14 +639,14 @@ def analyze_stock_pro(ticker):
             thesis = ai_data.get('thesis')
             score = ai_data.get('score')
             risk = ai_data.get('risk')
-            source = "✅ Yahoo Finance + OpenAI"
+            source = f"✅ Yahoo + {persona['emoji']} {persona_key}"
             
         except:
             verdict = "NEUTRE"
-            thesis = "Analyse technique seule (IA indisponible)."
+            thesis = f"Analyse technique seule (style {persona_key})."
             score = 50
             risk = "N/A"
-            source = "⚠️ Yahoo Finance (No IA)"
+            source = f"⚠️ Yahoo ({persona['emoji']} {persona_key})"
         
         return {
             "Ticker": ticker,
@@ -524,12 +663,16 @@ def analyze_stock_pro(ticker):
             "Verdict": verdict,
             "Thesis": thesis,
             "Risque": risk,
-            "Source": source
+            "Source": source,
+            "Persona": persona_key
         }
         
     except Exception:
         # ===== TENTATIVE 3 : MOCK DATA (Dernier recours) =====
-        return generate_rich_mock_data(ticker)
+        mock_data = generate_rich_mock_data(ticker)
+        mock_data["Persona"] = persona_key
+        mock_data["Source"] = f"⚠️ Simulation ({persona['emoji']} {persona_key})"
+        return mock_data
 
 # --- 6. INTERFACE TERMINAL ---
 
@@ -543,8 +686,32 @@ st.divider()
 
 # SIDEBAR (Contrôles)
 with st.sidebar:
-    st.title("🦅 HUNTER V19")
-    st.caption("Professional Infrastructure")
+    st.title("🦅 HUNTER V20")
+    st.caption("Strategic Personas")
+    
+    # SÉLECTION DU PERSONA (v20)
+    st.markdown("### 🧠 Mode d'Analyse")
+    persona_options = {
+        "Warren": f"{PERSONAS['Warren']['emoji']} {PERSONAS['Warren']['name']}",
+        "Cathie": f"{PERSONAS['Cathie']['emoji']} {PERSONAS['Cathie']['name']}",
+        "Jim": f"{PERSONAS['Jim']['emoji']} {PERSONAS['Jim']['name']}"
+    }
+    
+    selected_persona = st.selectbox(
+        "Persona d'Investisseur",
+        options=list(persona_options.keys()),
+        format_func=lambda x: persona_options[x],
+        index=0,
+        key="persona_selector"
+    )
+    
+    # Mise à jour du persona dans session_state
+    st.session_state['selected_persona'] = selected_persona
+    
+    # Description du persona
+    st.caption(PERSONAS[selected_persona]['description'])
+    
+    st.markdown("---")
     
     input_tickers = st.text_area("Watchlist", "NVDA PLTR AMD")
     
@@ -573,22 +740,24 @@ with st.sidebar:
     # Indicateur de statut
     if st.session_state['results']:
         st.markdown("---")
-        st.info(f"📊 {len(st.session_state['results'])} analyses en cache")
+        persona_emoji = get_persona_emoji(selected_persona)
+        st.info(f"{persona_emoji} {len(st.session_state['results'])} analyses en cache")
+
 
 # MAIN CONTENT
 
-# LOGIQUE v19 : PERSISTENCE
+# LOGIQUE v20 : PERSISTENCE + PERSONA
 if run_btn and tickers:
     # EXÉCUTION D'ANALYSE (écrase le cache)
-    with st.spinner("🔍 Analyse en cours..."):
+    with st.spinner(f"🔍 Analyse en cours avec {PERSONAS[selected_persona]['emoji']} {selected_persona}..."):
         results = {}
         for t in tickers:
-            results[t] = analyze_stock_pro(t)
+            results[t] = analyze_stock_pro(t, selected_persona)
         
         # SAUVEGARDE DANS SESSION STATE
         st.session_state['results'] = results
     
-    st.success("✅ Analyse terminée !")
+    st.success(f"✅ Analyse terminée (Mode {selected_persona}) !")
 
 # AFFICHAGE (depuis le cache si disponible)
 if st.session_state['results']:
@@ -596,12 +765,16 @@ if st.session_state['results']:
     report_data = []
     
     for ticker, data in results.items():
+        # Récupération du persona utilisé pour cette analyse
+        persona_used = data.get('Persona', 'Warren')
+        persona_emoji = get_persona_emoji(persona_used)
+        
         # CARD DESIGN (Bloomberg Terminal Style)
         with st.container(border=True):
-            # HEADER
+            # HEADER avec emoji persona
             c_head1, c_head2, c_head3 = st.columns([2, 4, 2])
             with c_head1:
-                st.markdown(f"## {data['Ticker']}")
+                st.markdown(f"## {data['Ticker']} {persona_emoji}")
                 st.caption(f"{data.get('Sector', 'N/A')} · {data.get('Industry', 'N/A')}")
             with c_head2:
                 delta_color = "normal" if data['Change'] > 0 else "inverse"
@@ -644,8 +817,8 @@ if st.session_state['results']:
                     st.caption(f"🌐 {data['Website']}")
 
             # --- MODULE DE CHAT CONTEXTUEL ---
-            with st.expander(f"💬 Discuter avec l'Analyste [{data['Ticker']}]"):
-                st.caption("Posez vos questions sur cette analyse. L'IA connaît toutes les métriques affichées ci-dessus.")
+            with st.expander(f"💬 Discuter avec l'Analyste [{data['Ticker']}] {persona_emoji}"):
+                st.caption(f"Posez vos questions dans le style {PERSONAS[persona_used]['name']}. L'IA connaît toutes les métriques affichées ci-dessus.")
                 
                 # Initialisation de l'historique pour ce ticker
                 if data['Ticker'] not in st.session_state['chat_history']:
@@ -658,21 +831,22 @@ if st.session_state['results']:
                 
                 # ÉTAPE 2 : Capturer le nouveau message
                 if prompt := st.chat_input(
-                    f"Ex: Pourquoi le PE est si élevé pour {data['Ticker']} ?",
+                    f"Ex: Cette valorisation est-elle justifiée selon {persona_used} ?",
                     key=f"chat_input_{data['Ticker']}"
                 ):
                     # ÉTAPE 3 : Afficher immédiatement le message utilisateur
                     with st.chat_message("user"):
                         st.write(prompt)
                     
-                    # ÉTAPE 4 : Générer et afficher la réponse assistant
+                    # ÉTAPE 4 : Générer et afficher la réponse assistant (avec persona)
                     with st.chat_message("assistant"):
-                        with st.spinner("Analyse en cours..."):
+                        with st.spinner(f"Analyse en cours ({persona_used})..."):
                             response = get_ai_response(
                                 data['Ticker'], 
                                 data, 
                                 prompt, 
-                                st.session_state['chat_history'][data['Ticker']]
+                                st.session_state['chat_history'][data['Ticker']],
+                                persona_used  # v20 : Passage du persona
                             )
                         st.write(response)
                     
