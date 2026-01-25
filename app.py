@@ -6,7 +6,8 @@ import plotly.graph_objects as go
 import os
 import json
 from openai import OpenAI
-from datetime import datetime, timedelta
+from bs4 import BeautifulSoup
+from fake_useragent import UserAgent
 
 # ==================== CONFIGURATION ====================
 try:
@@ -15,112 +16,146 @@ try:
 except ImportError:
     pass
 
-st.set_page_config(
-    page_title="AI Hunter V23 Fusion",
-    page_icon="🦅",
-    layout="wide"
-)
+st.set_page_config(page_title="AI Hunter V24 Armored", page_icon="🦅", layout="wide")
 
-# ==================== STYLES CSS (BLOOMBERG DARK) ====================
+# ==================== STYLES CSS ====================
 st.markdown("""
 <style>
     .stApp { background-color: #0a0e27; color: #00ff41; }
     .main { background-color: #0a0e27; }
     h1, h2, h3, h4, p, label, div { font-family: 'Courier New', monospace; color: #00ff41 !important; }
     div[data-testid="stMetricValue"] { color: #00ff41 !important; font-size: 1.6rem !important; }
-    div[data-testid="stMetricLabel"] { color: #888888 !important; }
-    .stMetric { background-color: #1a1f3a; padding: 10px; border-radius: 5px; border: 1px solid #00ff41; }
-    .stButton > button { background-color: #1a1f3a; color: #00ff41; border: 2px solid #00ff41; font-weight: bold; }
-    .stButton > button:hover { background-color: #00ff41; color: #0a0e27; }
+    .stMetric { background-color: #1a1f3a; padding: 10px; border: 1px solid #00ff41; border-radius: 5px; }
     .macro-banner {
         background: linear-gradient(90deg, #1a1f3a 0%, #2a2f4a 100%);
-        padding: 15px; border-radius: 8px; border: 1px solid #00ff41;
+        padding: 15px; border: 1px solid #00ff41; border-radius: 8px;
         margin-bottom: 20px; text-align: center;
     }
-    .verdict-box {
-        padding: 15px; border-radius: 8px; font-size: 18px; font-weight: bold;
-        text-align: center; margin-bottom: 10px; border: 2px solid;
-    }
+    .verdict-box { padding: 15px; border-radius: 8px; font-weight: bold; text-align: center; border: 2px solid; }
 </style>
 """, unsafe_allow_html=True)
 
-# ==================== MOTEUR DE DONNÉES (HYBRIDE) ====================
+# ==================== MOTEUR DE DONNÉES BLINDÉ ====================
+
+def scrape_yahoo_data(ticker):
+    """
+    PLAN B: Scrape directement le HTML de Yahoo si l'API est bloquée.
+    Utilise BeautifulSoup pour éviter les erreurs de lecture (ex: prix Apple 87k).
+    """
+    try:
+        ua = UserAgent()
+        headers = {'User-Agent': ua.random, 'Referer': 'https://www.google.com/'}
+        url = f"https://finance.yahoo.com/quote/{ticker}"
+        
+        response = requests.get(url, headers=headers, timeout=5)
+        if response.status_code != 200: return None
+
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # 1. Extraction du PRIX (Balise fin-streamer très fiable)
+        price_tag = soup.find('fin-streamer', {'data-field': 'regularMarketPrice'})
+        price = float(price_tag['value']) if price_tag else 0.0
+        
+        # 2. Extraction Variation
+        change_tag = soup.find('fin-streamer', {'data-field': 'regularMarketChangePercent'})
+        change = float(change_tag['value']) if change_tag else 0.0
+        
+        # 3. Market Cap (souvent dans une table)
+        # On essaie de trouver la table des stats
+        stats = {}
+        # Cette partie est plus fragile, on met des valeurs par défaut sécurisées
+        
+        return {
+            'ticker': ticker,
+            'name': ticker, # Difficile à extraire proprement sans API
+            'current_price': price,
+            'history': pd.DataFrame(), # Pas d'historique en mode scraping
+            'trend_6m': change * 10, # Estimation grossière ou 0
+            'market_cap': 0,
+            'trailing_pe': 0,
+            'debt': 0,
+            'revenue_growth': 0,
+            'source': 'SCRAPING WEB (Mode Survie)'
+        }
+    except Exception as e:
+        print(f"Erreur Scraping: {e}")
+        return None
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_stock_data(ticker_symbol):
+    # --- PLAN A : YFINANCE BULK DOWNLOAD (Souvent moins bloqué) ---
     try:
-        # Headers "Magiques" pour passer pour un utilisateur Google
-        session = requests.Session()
-        session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Referer': 'https://www.google.com/',
-            'Accept-Language': 'en-US,en;q=0.9',
-        })
+        # On utilise .download au lieu de .Ticker.history
+        df = yf.download(ticker_symbol, period="6mo", progress=False)
+        
+        if df.empty:
+            raise Exception("Download vide")
 
+        # Infos fondamentales (Ticker API)
+        # On met un User-Agent rotatif pour maximiser les chances
+        session = requests.Session()
+        session.headers['User-Agent'] = UserAgent().chrome
         stock = yf.Ticker(ticker_symbol, session=session)
         
-        # 1. Historique (Graphique)
-        hist = stock.history(period="6mo")
-        
-        if hist.empty:
-            return None # Si pas d'historique, on considère que ça a échoué proprement
-            
-        # 2. Infos Fondamentales (Avec sécurité anti-crash)
         try:
             info = stock.info
         except:
             info = {}
 
-        # Calculs sécurisés
-        price_today = hist['Close'].iloc[-1]
-        price_6m_ago = hist['Close'].iloc[0]
-        trend_6m = ((price_today - price_6m_ago) / price_6m_ago) * 100
-        
-        # Valeurs par défaut si Yahoo bloque les infos détaillées
-        data = {
+        # Calculs
+        try:
+            # Gestion des multi-index de yfinance récents
+            close_col = df['Close']
+            if isinstance(close_col, pd.DataFrame):
+                close_col = close_col.iloc[:, 0]
+                
+            price_today = float(close_col.iloc[-1])
+            price_6m_ago = float(close_col.iloc[0])
+            trend_6m = ((price_today - price_6m_ago) / price_6m_ago) * 100
+        except:
+            price_today = 0
+            trend_6m = 0
+
+        return {
             'ticker': ticker_symbol,
             'name': info.get('longName', ticker_symbol),
             'current_price': price_today,
-            'history': hist,
+            'history': df,
             'trend_6m': trend_6m,
             'market_cap': info.get('marketCap', 0),
             'trailing_pe': info.get('trailingPE', 0),
-            'beta': info.get('beta', 1.0),
             'debt': info.get('totalDebt', 0),
-            'cashflow': info.get('freeCashflow', 0),
             'revenue_growth': info.get('revenueGrowth', 0),
-            'profit_margins': info.get('profitMargins', 0)
+            'source': 'API YFINANCE'
         }
-        return data
 
-    except Exception as e:
-        print(f"Erreur Fetch: {e}")
-        return None
+    except Exception:
+        # --- PLAN B : SCRAPING DE SECOURS ---
+        print(f"⚠️ Plan A échoué pour {ticker_symbol}, passage au Plan B (Scraping)")
+        return scrape_yahoo_data(ticker_symbol)
 
-# ==================== CERVEAU IA (OPENAI) ====================
+# ==================== CERVEAU IA ====================
 def analyze_with_ai(persona, data):
     try:
         api_key = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY")
         if not api_key: return {'verdict': 'ERROR', 'score': 0, 'thesis': 'Clé API manquante', 'risk': 'HIGH'}
         
         client = OpenAI(api_key=api_key)
-        
-        logic = "RÈGLE: Score < 45 = SELL, 46-65 = HOLD, > 66 = BUY."
-        
+        logic = "Score < 45 = SELL, 46-65 = HOLD, > 66 = BUY."
         prompts = {
-            "Warren": f"Tu es Warren Buffett. Value Investing. {logic}",
-            "Cathie": f"Tu es Cathie Wood. Innovation Growth. {logic}",
-            "Jim": f"Tu es Jim Cramer. Momentum Trading. {logic}"
+            "Warren": f"Warren Buffett. Value. {logic}",
+            "Cathie": f"Cathie Wood. Growth. {logic}",
+            "Jim": f"Jim Cramer. Momentum. {logic}"
         }
         
-        # Formatage sécurisé des chiffres pour l'IA
-        debt_str = f"${data['debt']/1e9:.1f}B" if data['debt'] else "N/A"
-        pe_str = f"{data['trailing_pe']:.1f}" if data['trailing_pe'] else "N/A"
-        growth_str = f"{data['revenue_growth']*100:.1f}%" if data['revenue_growth'] else "N/A"
+        # Message adapté selon la source
+        source_msg = "(Données limitées - Mode Survie)" if "SCRAPING" in data['source'] else "(Données Complètes)"
         
         user_msg = f"""
-        ANALYSE: {data['ticker']} (${data['current_price']:.2f})
-        Trend 6M: {data['trend_6m']:.1f}%
-        PE: {pe_str} | Dette: {debt_str} | Rev Growth: {growth_str}
+        ANALYSE: {data['ticker']} {source_msg}
+        Prix: ${data['current_price']:.2f}
+        Trend 6M: {data.get('trend_6m', 0):.1f}%
+        PE: {data.get('trailing_pe', 'N/A')}
         """
         
         response = client.chat.completions.create(
@@ -133,35 +168,13 @@ def analyze_with_ai(persona, data):
             response_format={"type": "json_object"}
         )
         return json.loads(response.choices[0].message.content)
-    
-    except Exception as e:
-        return {'verdict': 'ERROR', 'score': 0, 'thesis': f"Erreur IA: {str(e)}", 'risk': 'HIGH'}
-
-# ==================== GRAPHIQUE PLOTLY ====================
-def create_chart(data):
-    fig = go.Figure()
-    # Chandelier
-    fig.add_trace(go.Candlestick(
-        x=data['history'].index,
-        open=data['history']['Open'], high=data['history']['High'],
-        low=data['history']['Low'], close=data['history']['Close'],
-        name='Prix', increasing_line_color='#00ff41', decreasing_line_color='#ff0000'
-    ))
-    # Layout Bloomberg
-    fig.update_layout(
-        paper_bgcolor='#1a1f3a', plot_bgcolor='#1a1f3a',
-        font=dict(color='#00ff41', family='Courier New'),
-        height=400, margin=dict(l=20, r=20, t=30, b=20),
-        xaxis_rangeslider_visible=False
-    )
-    return fig
+    except:
+        return {'verdict': 'ERROR', 'score': 0, 'thesis': "Erreur IA", 'risk': 'HIGH'}
 
 # ==================== MAIN UI ====================
 def main():
-    st.title("🦅 AI HUNTER V23 FUSION")
-    st.markdown("*Design Plotly + Moteur Hybride + GPT Logic*")
-    
-    # Macro Banner
+    st.title("🦅 AI HUNTER V24 ARMORED")
+    st.markdown("*Multi-Layer Data Engine*")
     st.markdown('<div class="macro-banner">📈 MARKET | S&P500: +0.4% | BTC: $98k | VIX: 13.5</div>', unsafe_allow_html=True)
     
     col1, col2 = st.columns([3, 1])
@@ -169,42 +182,49 @@ def main():
     with col2: btn = st.button("🚀 ANALYZE", type="primary", use_container_width=True)
     
     if btn and ticker:
-        with st.spinner(f"🔍 Analyse de {ticker}..."):
+        with st.spinner(f"🔍 Extraction ({ticker})..."):
             data = fetch_stock_data(ticker)
         
-        if not data:
-            st.error(f"❌ Impossible de récupérer {ticker}. Yahoo Finance bloque l'accès Cloud temporairement.")
-            st.info("💡 Astuce : Réessayez dans 5 minutes ou testez un autre ticker.")
+        if not data or data['current_price'] == 0:
+            st.error(f"❌ Impossible de lire les données de {ticker}.")
+            st.warning("Yahoo Finance bloque agressivement le Cloud aujourd'hui.")
             return
 
-        # Header Prix
+        # Header
         st.markdown(f"## {data['ticker']} - {data['name']}")
-        st.markdown(f"# ${data['current_price']:.2f} <span style='font-size:24px; color:{'#00ff41' if data['trend_6m']>0 else '#ff0000'}'>({data['trend_6m']:+.1f}%)</span>", unsafe_allow_html=True)
-        
-        # Graphique Plotly
-        st.plotly_chart(create_chart(data), use_container_width=True)
-        
+        st.markdown(f"# ${data['current_price']:.2f}")
+        if "SCRAPING" in data['source']:
+            st.warning("⚠️ Mode Survie : Graphique historique bloqué, mais Prix en temps réel récupéré.")
+        else:
+            st.success(f"✅ Source : {data['source']}")
+
+        # Chart (Si dispo)
+        if not data['history'].empty:
+            fig = go.Figure(data=[go.Candlestick(
+                x=data['history'].index,
+                open=data['history']['Open'], high=data['history']['High'],
+                low=data['history']['Low'], close=data['history']['Close'],
+                increasing_line_color='#00ff41', decreasing_line_color='#ff0000'
+            )])
+            fig.update_layout(paper_bgcolor='#1a1f3a', plot_bgcolor='#1a1f3a', font={'color':'#00ff41'}, height=400, xaxis_rangeslider_visible=False)
+            st.plotly_chart(fig, use_container_width=True)
+
         # Métriques
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("PE Ratio", f"{data['trailing_pe']:.1f}" if data['trailing_pe'] else "N/A")
-        c2.metric("Market Cap", f"${data['market_cap']/1e9:.1f}B" if data['market_cap'] else "N/A")
-        c3.metric("Dette Total", f"${data['debt']/1e9:.1f}B" if data['debt'] else "N/A")
-        c4.metric("Rev Growth", f"{data['revenue_growth']*100:.1f}%" if data['revenue_growth'] else "N/A")
-        
-        # AI Analysis
+        c1.metric("PE Ratio", f"{data.get('trailing_pe', 0):.1f}")
+        c2.metric("Market Cap", f"${data.get('market_cap', 0)/1e9:.1f}B")
+        c3.metric("Dette", f"${data.get('debt', 0)/1e9:.1f}B")
+        c4.metric("Trend 6M", f"{data.get('trend_6m', 0):.1f}%")
+
+        # AI
         st.markdown("---")
-        st.subheader("🤖 AI Council")
         cols = st.columns(3)
         for i, p in enumerate(["Warren", "Cathie", "Jim"]):
             with cols[i]:
                 res = analyze_with_ai(p, data)
-                # Affichage Verdict
-                verdict = res.get('verdict', 'N/A')
-                score = res.get('score', 0)
-                color = "#00ff41" if "BUY" in str(verdict) else "#ff4136" if "SELL" in str(verdict) else "#ffdc00"
-                
-                st.markdown(f'<div class="verdict-box" style="color:{color}; border-color:{color}">{verdict} ({score}/100)</div>', unsafe_allow_html=True)
-                st.info(res.get('thesis', 'Pas d\'analyse disponible'))
+                color = "#00ff41" if "BUY" in str(res.get('verdict')) else "#ff4136"
+                st.markdown(f'<div class="verdict-box" style="color:{color}; border-color:{color}">{res.get("verdict", "N/A")} ({res.get("score", 0)})</div>', unsafe_allow_html=True)
+                st.info(res.get('thesis', 'N/A'))
 
 if __name__ == "__main__":
     main()
