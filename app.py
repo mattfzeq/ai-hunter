@@ -48,7 +48,7 @@ st.markdown("""
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_stock_data(ticker_symbol):
     try:
-        # Headers "Magiques" de Claude pour passer pour un utilisateur Google
+        # Headers "Magiques" pour passer pour un utilisateur Google
         session = requests.Session()
         session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -133,6 +133,7 @@ def analyze_with_ai(persona, data):
             response_format={"type": "json_object"}
         )
         return json.loads(response.choices[0].message.content)
+    
     except Exception as e:
         return {'verdict': 'ERROR', 'score': 0, 'thesis': f"Erreur IA: {str(e)}", 'risk': 'HIGH'}
 
