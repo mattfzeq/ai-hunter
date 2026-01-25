@@ -1,7 +1,6 @@
 streamlit
-openai
 yfinance
+openai
 pandas
+numpy
 python-dotenv
-openpyxl
-plotly
