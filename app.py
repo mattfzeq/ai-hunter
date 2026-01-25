@@ -96,6 +96,15 @@ st.markdown("""
         text-align: center;
         margin-bottom: 10px;
     }
+    .error-box {
+        background-color: #4d0000;
+        color: #ff4136;
+        padding: 15px;
+        border-radius: 8px;
+        border: 1px solid #ff4136;
+        margin: 10px 0;
+        font-family: 'Courier New', monospace;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -116,61 +125,87 @@ def render_macro_banner():
     """, unsafe_allow_html=True)
 
 # ============================================================================
-# DATA ENGINE (YFINANCE)
+# DATA ENGINE (YFINANCE) - VERSION CORRIGÉE
 # ============================================================================
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_stock_data(ticker):
     """
-    Récupère les données via yfinance avec une session HTTP personnalisée
-    pour éviter le blocage (Erreur 403/404 sur le Cloud).
+    Récupère les données via yfinance avec gestion d'erreur améliorée
     """
     try:
-        # --- FIX ANTI-BLOCAGE YAHOO ---
-        # On crée une fausse identité de navigateur (Chrome sur Mac)
+        # Session avec User-Agent pour éviter le blocage Yahoo
         session = requests.Session()
         session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
         })
-        # -------------------------------
-
+        
+        # Créer l'objet Ticker
         stock = yf.Ticker(ticker, session=session)
         
-        # Historique 6 mois
+        # Récupérer l'historique sur 6 mois
         hist = stock.history(period="6mo")
         
-        # Double vérification si vide (parfois Yahoo renvoie vide sans erreur)
+        # Vérifier si l'historique est vide
         if hist.empty:
+            st.error(f"❌ Aucune donnée historique trouvée pour {ticker}")
             return None
         
-        # Tendance 6 mois
+        # Vérifier qu'on a au moins quelques jours de données
+        if len(hist) < 5:
+            st.warning(f"⚠️ Données limitées pour {ticker} ({len(hist)} jours)")
+            return None
+        
+        # Calculer la tendance 6 mois
         price_6m_ago = hist['Close'].iloc[0]
         price_today = hist['Close'].iloc[-1]
         trend_6m = ((price_today - price_6m_ago) / price_6m_ago) * 100
         
+        # Récupérer les infos fondamentales
         info = stock.info
         
-        # Si info est vide ou ne contient pas 'regularMarketPrice', c'est louche
-        # On continue quand même avec ce qu'on a, mais c'est un point de vigilance.
+        # Vérifier que info n'est pas vide
+        if not info or len(info) < 5:
+            st.warning(f"⚠️ Informations limitées pour {ticker}")
         
-        return {
+        # Construire le dictionnaire de résultats avec valeurs par défaut
+        result = {
             'ticker': ticker,
             'history': hist,
             'trend_6m': trend_6m,
             'market_cap': info.get('marketCap', 0),
-            'trailing_pe': info.get('trailingPE', None),
-            'beta': info.get('beta', None),
-            'profit_margins': info.get('profitMargins', None),
-            'revenue_growth': info.get('revenueGrowth', None),
-            'total_debt': info.get('totalDebt', None),
-            'free_cashflow': info.get('freeCashflow', None),
-            'news': [n.get('title', 'N/A') for n in (stock.news[:3] if hasattr(stock, 'news') and stock.news else [])],
+            'trailing_pe': info.get('trailingPE', info.get('forwardPE', None)),
+            'beta': info.get('beta', 1.0),
+            'profit_margins': info.get('profitMargins', 0),
+            'revenue_growth': info.get('revenueGrowth', 0),
+            'total_debt': info.get('totalDebt', 0),
+            'free_cashflow': info.get('freeCashflow', 0),
             'current_price': price_today
         }
+        
+        # Récupérer les news si disponibles
+        try:
+            news_items = stock.news if hasattr(stock, 'news') else []
+            result['news'] = [n.get('title', 'N/A') for n in news_items[:3]] if news_items else []
+        except:
+            result['news'] = []
+        
+        return result
     
+    except requests.exceptions.HTTPError as e:
+        st.error(f"❌ Erreur HTTP {e.response.status_code}: Yahoo Finance a bloqué la requête")
+        st.info("💡 Essayez un autre ticker ou attendez quelques minutes")
+        return None
+    except requests.exceptions.ConnectionError:
+        st.error("❌ Erreur de connexion - Vérifiez votre connexion Internet")
+        return None
     except Exception as e:
-        # Affiche l'erreur réelle dans les logs du serveur (optionnel mais utile)
-        print(f"Erreur Yahoo: {str(e)}")
+        st.error(f"❌ Erreur inattendue: {str(e)}")
+        st.code(f"Type d'erreur: {type(e).__name__}")
         return None
 
 # ============================================================================
@@ -180,7 +215,13 @@ def fetch_stock_data(ticker):
 def analyze_with_ai(persona, stock_data):
     try:
         api_key = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY")
-        if not api_key: return {'verdict': 'ERROR', 'score': 0, 'thesis': 'Clé API manquante', 'risk': 'HIGH'}
+        if not api_key: 
+            return {
+                'verdict': 'ERROR', 
+                'score': 0, 
+                'thesis': 'Clé API OpenAI manquante. Ajoutez OPENAI_API_KEY dans .env ou Streamlit secrets.', 
+                'risk': 'HIGH'
+            }
         
         client = OpenAI(api_key=api_key)
         
@@ -195,7 +236,7 @@ def analyze_with_ai(persona, stock_data):
 
         if persona == "Warren":
             system_prompt = f"""Tu es Warren Buffett. Prudence absolue.
-            Tu détestes la dette élevée et les PE > 30. Tu aimes le Cash Flow.
+            Tu détestes la dette élevée et les PE > 30. Tu aimes le Cash Flow positif.
             {logic_matrix}
             Réponds en JSON : {{"verdict": "BUY/HOLD/SELL", "score": 0-100, "thesis": "...", "risk": "LOW/MEDIUM/HIGH"}}"""
         
@@ -214,12 +255,12 @@ def analyze_with_ai(persona, stock_data):
         # Données envoyées à l'IA
         user_message = f"""
         ANALYSE : {stock_data['ticker']}
-        Prix: {stock_data['current_price']:.2f}$
+        Prix: ${stock_data['current_price']:.2f}
         Trend 6M: {stock_data['trend_6m']:.2f}%
-        PE: {stock_data['trailing_pe']}
-        Dette: {stock_data['total_debt']} (CRITIQUE)
-        CashFlow: {stock_data['free_cashflow']}
-        Rev Growth: {stock_data['revenue_growth']}
+        PE: {stock_data['trailing_pe'] if stock_data['trailing_pe'] else 'N/A'}
+        Dette: ${stock_data['total_debt']/1e9:.2f}B (CRITIQUE)
+        CashFlow: ${stock_data['free_cashflow']/1e9:.2f}B
+        Rev Growth: {stock_data['revenue_growth']*100:.1f}% si {stock_data['revenue_growth']} else 'N/A'}
         Beta: {stock_data['beta']}
         """
         
@@ -234,10 +275,16 @@ def analyze_with_ai(persona, stock_data):
             response_format={"type": "json_object"}
         )
         
-        return json.loads(response.choices[0].message.content)
+        result = json.loads(response.choices[0].message.content)
+        return result
     
     except Exception as e:
-        return {'verdict': 'ERROR', 'score': 0, 'thesis': str(e), 'risk': 'HIGH'}
+        return {
+            'verdict': 'ERROR', 
+            'score': 0, 
+            'thesis': f"Erreur AI: {str(e)}", 
+            'risk': 'HIGH'
+        }
 
 # ============================================================================
 # UI COMPONENTS
@@ -282,11 +329,23 @@ def main():
     
     if analyze_btn and ticker_input:
         ticker = ticker_input.strip().upper()
-        with st.spinner(f"Fetching {ticker}..."):
+        
+        # Afficher un message de diagnostic
+        with st.spinner(f"🔍 Récupération des données pour {ticker}..."):
             data = fetch_stock_data(ticker)
         
+        # Meilleur diagnostic si échec
         if not data:
-            st.error("Ticker introuvable.")
+            st.markdown(f"""
+            <div class="error-box">
+                <strong>❌ Impossible de récupérer les données pour {ticker}</strong><br><br>
+                Causes possibles:<br>
+                • Le ticker n'existe pas ou est mal orthographié<br>
+                • Yahoo Finance bloque les requêtes (essayez dans quelques minutes)<br>
+                • Le ticker nécessite un suffixe de marché (ex: TICKER.PA pour Paris)<br><br>
+                💡 Essayez: AAPL, MSFT, GOOGL, TSLA, AMZN
+            </div>
+            """, unsafe_allow_html=True)
             return
         
         # Metrics UI
