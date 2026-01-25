@@ -125,79 +125,80 @@ def render_macro_banner():
     """, unsafe_allow_html=True)
 
 # ============================================================================
-# DATA ENGINE (YFINANCE ROBUSTE)
+# DATA ENGINE (YFINANCE MODE TANK)
 # ============================================================================
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_stock_data(ticker):
     """
-    Récupère les données via yfinance avec gestion d'erreur améliorée
+    Récupère les données avec une stratégie de repli (Fallback).
+    Si l'historique est bloqué, on utilise 'fast_info' pour avoir au moins le prix.
     """
     try:
-        # Session avec User-Agent pour éviter le blocage Yahoo
+        # Session "Linux" (marche mieux sur les serveurs Cloud)
         session = requests.Session()
         session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate',
-            'Connection': 'keep-alive',
+            'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         })
         
         stock = yf.Ticker(ticker, session=session)
         
-        # Récupérer l'historique sur 6 mois
-        hist = stock.history(period="6mo")
-        
-        if hist.empty:
-            st.error(f"❌ Aucune donnée historique trouvée pour {ticker}")
+        # 1. TENTATIVE PRIX IMMÉDIAT (Fast Info) - Souvent non bloqué
+        try:
+            current_price = stock.fast_info['last_price']
+        except:
+            # Si même ça échoue, le ticker est probablement invalide
+            st.error(f"❌ Impossible de lire le prix pour {ticker}")
             return None
-        
-        if len(hist) < 5:
-            st.warning(f"⚠️ Données limitées pour {ticker}")
-            return None
-        
-        price_6m_ago = hist['Close'].iloc[0]
-        price_today = hist['Close'].iloc[-1]
-        trend_6m = ((price_today - price_6m_ago) / price_6m_ago) * 100
-        
-        # Récupérer les infos fondamentales
+
+        # 2. TENTATIVE HISTORIQUE (Pour le graphique et Trend)
+        try:
+            hist = stock.history(period="6mo")
+            if not hist.empty:
+                price_6m_ago = hist['Close'].iloc[0]
+                price_today = hist['Close'].iloc[-1]
+                trend_6m = ((price_today - price_6m_ago) / price_6m_ago) * 100
+                has_history = True
+            else:
+                raise Exception("Empty History")
+        except:
+            # Si bloqué, on simule des données neutres
+            print(f"⚠️ Historique bloqué pour {ticker}")
+            hist = pd.DataFrame()
+            trend_6m = 0
+            has_history = False
+
+        # 3. TENTATIVE INFOS FONDAMENTALES
         try:
             info = stock.info
         except:
             info = {}
 
-        # Mode dégradé si info vide
-        market_cap = info.get('marketCap', 0)
+        # Mode dégradé intelligent
+        market_cap = info.get('marketCap', stock.fast_info.get('market_cap', 0))
         trailing_pe = info.get('trailingPE', 0)
-        if trailing_pe is None: trailing_pe = 0
         
-        # Construction du dictionnaire
+        # Construction du résultat
         result = {
             'ticker': ticker,
             'history': hist,
+            'has_history': has_history, # Indicateur pour l'interface
             'trend_6m': trend_6m,
             'market_cap': market_cap,
-            'trailing_pe': trailing_pe,
+            'trailing_pe': trailing_pe if trailing_pe else 0,
             'beta': info.get('beta', 1.0),
             'profit_margins': info.get('profitMargins', 0),
             'revenue_growth': info.get('revenueGrowth', 0),
             'total_debt': info.get('totalDebt', 0),
             'free_cashflow': info.get('freeCashflow', 0),
-            'current_price': price_today
+            'current_price': current_price,
+            'news': []
         }
-        
-        # Récupérer les news
-        try:
-            news_items = stock.news if hasattr(stock, 'news') else []
-            result['news'] = [n.get('title', 'N/A') for n in news_items[:3]] if news_items else []
-        except:
-            result['news'] = []
         
         return result
     
     except Exception as e:
-        print(f"Erreur fetch_data: {e}")
+        print(f"Erreur critique fetch_data: {e}")
         return None
 
 # ============================================================================
@@ -208,12 +209,7 @@ def analyze_with_ai(persona, stock_data):
     try:
         api_key = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY")
         if not api_key: 
-            return {
-                'verdict': 'ERROR', 
-                'score': 0, 
-                'thesis': 'Clé API OpenAI manquante.', 
-                'risk': 'HIGH'
-            }
+            return {'verdict': 'ERROR', 'score': 0, 'thesis': 'Clé API manquante', 'risk': 'HIGH'}
         
         client = OpenAI(api_key=api_key)
         
@@ -226,29 +222,21 @@ def analyze_with_ai(persona, stock_data):
         """
 
         if persona == "Warren":
-            system_prompt = f"""Tu es Warren Buffett. Prudence absolue.
-            Tu détestes la dette élevée et les PE > 30.
-            {logic_matrix}
-            Réponds en JSON : {{"verdict": "BUY/HOLD/SELL", "score": 0-100, "thesis": "...", "risk": "LOW/MEDIUM/HIGH"}}"""
-        
+            system_prompt = f"Tu es Warren Buffett. {logic_matrix} Réponds en JSON."
         elif persona == "Cathie":
-            system_prompt = f"""Tu es Cathie Wood. Tu aimes l'innovation.
-            Tu ignores la dette si la croissance des revenus est forte (>20%).
-            {logic_matrix}
-            Réponds en JSON : {{"verdict": "BUY/HOLD/SELL", "score": 0-100, "thesis": "...", "risk": "LOW/MEDIUM/HIGH"}}"""
+            system_prompt = f"Tu es Cathie Wood. {logic_matrix} Réponds en JSON."
+        else:
+            system_prompt = f"Tu es Jim Cramer. {logic_matrix} Réponds en JSON."
         
-        else:  # Jim
-            system_prompt = f"""Tu es Jim Cramer. Tu joues la tendance (Momentum).
-            Si Trend 6M est positif et Beta élevé -> Tu achètes.
-            {logic_matrix}
-            Réponds en JSON : {{"verdict": "BUY/HOLD/SELL", "score": 0-100, "thesis": "...", "risk": "LOW/MEDIUM/HIGH"}}"""
-        
-        # --- FIX: Calcul propre de la croissance pour éviter l'erreur de syntaxe ---
+        # Données formatées
         rev_growth_val = stock_data['revenue_growth']
         rev_growth_str = f"{rev_growth_val*100:.1f}%" if rev_growth_val else "N/A"
         
+        # Mention spéciale si données partielles
+        warning_msg = "(Données partielles - Yahoo Limit)" if not stock_data['has_history'] else ""
+
         user_message = f"""
-        ANALYSE : {stock_data['ticker']}
+        ANALYSE : {stock_data['ticker']} {warning_msg}
         Prix: ${stock_data['current_price']:.2f}
         Trend 6M: {stock_data['trend_6m']:.2f}%
         PE: {stock_data['trailing_pe']}
@@ -268,7 +256,6 @@ def analyze_with_ai(persona, stock_data):
             seed=42,
             response_format={"type": "json_object"}
         )
-        
         return json.loads(response.choices[0].message.content)
     
     except Exception as e:
@@ -324,8 +311,8 @@ def main():
         if not data:
             st.markdown(f"""
             <div class="error-box">
-                <strong>❌ Impossible de récupérer les données pour {ticker}</strong><br>
-                Yahoo Finance a peut-être bloqué la requête. Réessayez dans 1 minute.
+                <strong>❌ Ticker {ticker} introuvable (ou bloqué)</strong><br>
+                Yahoo Finance bloque l'accès depuis le Cloud. Réessayez plus tard.
             </div>
             """, unsafe_allow_html=True)
             return
@@ -333,6 +320,11 @@ def main():
         # Metrics UI
         st.markdown("---")
         st.subheader(f"📈 {ticker} - ${data['current_price']:.2f}")
+        
+        # Avertissement si mode dégradé
+        if not data['has_history']:
+            st.warning("⚠️ Graphique bloqué par Yahoo - Analyse basée sur le prix actuel uniquement.")
+
         c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("Trend 6M", f"{data['trend_6m']:.1f}%", delta_color="normal" if data['trend_6m']>0 else "inverse")
         c2.metric("Market Cap", f"${data['market_cap']/1e9:.1f}B")
@@ -340,8 +332,9 @@ def main():
         c4.metric("Dette", f"${data['total_debt']/1e9:.1f}B" if data['total_debt'] else "N/A")
         c5.metric("Free CashFlow", f"${data['free_cashflow']/1e9:.1f}B" if data['free_cashflow'] else "N/A")
         
-        # Chart
-        st.area_chart(data['history']['Close'], color="#00ff41")
+        # Chart (Seulement si dispo)
+        if data['has_history'] and not data['history'].empty:
+            st.area_chart(data['history']['Close'], color="#00ff41")
         
         # AI Analysis
         st.markdown("---")
