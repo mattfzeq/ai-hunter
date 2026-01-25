@@ -133,7 +133,12 @@ def fetch_stock_data(ticker):
     """
     Récupère les données via yfinance avec gestion d'erreur améliorée
     """
+    import time
+    
     try:
+        # Petit délai pour éviter le rate limiting
+        time.sleep(1)
+        
         # Créer l'objet Ticker SANS session personnalisée
         # (yfinance gère automatiquement curl_cffi maintenant)
         stock = yf.Ticker(ticker)
@@ -155,6 +160,9 @@ def fetch_stock_data(ticker):
         price_6m_ago = hist['Close'].iloc[0]
         price_today = hist['Close'].iloc[-1]
         trend_6m = ((price_today - price_6m_ago) / price_6m_ago) * 100
+        
+        # Attendre un peu avant de récupérer les infos (éviter rate limit)
+        time.sleep(0.5)
         
         # Récupérer les infos fondamentales
         info = stock.info
@@ -187,16 +195,34 @@ def fetch_stock_data(ticker):
         
         return result
     
-    except requests.exceptions.HTTPError as e:
-        st.error(f"❌ Erreur HTTP {e.response.status_code}: Yahoo Finance a bloqué la requête")
-        st.info("💡 Essayez un autre ticker ou attendez quelques minutes")
-        return None
-    except requests.exceptions.ConnectionError:
-        st.error("❌ Erreur de connexion - Vérifiez votre connexion Internet")
-        return None
     except Exception as e:
+        error_type = type(e).__name__
+        
+        # Gestion spécifique du rate limiting
+        if 'RateLimit' in error_type or 'Too Many Requests' in str(e):
+            st.error("⏱️ **Rate Limit Yahoo Finance atteint**")
+            st.warning("💡 **Solutions:**")
+            st.info("""
+            1. Attends 1-2 minutes avant de réessayer
+            2. Vide le cache avec Ctrl+Shift+R (ou Cmd+Shift+R sur Mac)
+            3. Si le problème persiste, Yahoo bloque ton IP temporairement
+            """)
+            return None
+        
+        # Autres erreurs HTTP
+        if hasattr(e, 'response'):
+            st.error(f"❌ Erreur HTTP {e.response.status_code}: Yahoo Finance a bloqué la requête")
+            st.info("💡 Essayez un autre ticker ou attendez quelques minutes")
+            return None
+        
+        # Erreur de connexion
+        if 'Connection' in error_type:
+            st.error("❌ Erreur de connexion - Vérifiez votre connexion Internet")
+            return None
+        
+        # Erreur générique
         st.error(f"❌ Erreur inattendue: {str(e)}")
-        st.code(f"Type d'erreur: {type(e).__name__}")
+        st.code(f"Type d'erreur: {error_type}")
         return None
 
 # ============================================================================
@@ -315,6 +341,12 @@ def main():
     st.title("🎯 AI HUNTER V21 ULTIMATE")
     st.markdown("*Powered by yfinance + GPT-3.5-Turbo (Logic Enforced)*")
     render_macro_banner()
+    
+    # Bouton pour vider le cache en cas de rate limit
+    if st.button("🔄 Vider le Cache", help="Utilise ceci si tu rencontres des erreurs de rate limit"):
+        st.cache_data.clear()
+        st.success("✅ Cache vidé ! Réessaye maintenant.")
+        st.rerun()
     
     col1, col2 = st.columns([3, 1])
     with col1: ticker_input = st.text_input("🔍 Ticker", value="NVDA")
