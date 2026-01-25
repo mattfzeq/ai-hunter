@@ -253,6 +253,8 @@ def analyze_with_ai(persona, stock_data):
             Réponds en JSON : {{"verdict": "BUY/HOLD/SELL", "score": 0-100, "thesis": "...", "risk": "LOW/MEDIUM/HIGH"}}"""
         
         # Données envoyées à l'IA
+        rev_growth = f"{stock_data['revenue_growth']*100:.1f}%" if stock_data['revenue_growth'] else 'N/A'
+        
         user_message = f"""
         ANALYSE : {stock_data['ticker']}
         Prix: ${stock_data['current_price']:.2f}
@@ -260,7 +262,7 @@ def analyze_with_ai(persona, stock_data):
         PE: {stock_data['trailing_pe'] if stock_data['trailing_pe'] else 'N/A'}
         Dette: ${stock_data['total_debt']/1e9:.2f}B (CRITIQUE)
         CashFlow: ${stock_data['free_cashflow']/1e9:.2f}B
-        Rev Growth: {stock_data['revenue_growth']*100:.1f}% si {stock_data['revenue_growth']} else 'N/A'}
+        Rev Growth: {rev_growth}
         Beta: {stock_data['beta']}
         """
         
