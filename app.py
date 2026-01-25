@@ -1,3 +1,4 @@
+import requests
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -120,35 +121,56 @@ def render_macro_banner():
 
 @st.cache_data(ttl=3600)
 def fetch_stock_data(ticker):
+    """
+    Récupère les données via yfinance avec une session HTTP personnalisée
+    pour éviter le blocage (Erreur 403/404 sur le Cloud).
+    """
     try:
-        stock = yf.Ticker(ticker)
-        hist = stock.history(period="6mo")
-        if hist.empty: return None
+        # --- FIX ANTI-BLOCAGE YAHOO ---
+        # On crée une fausse identité de navigateur (Chrome sur Mac)
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        })
+        # -------------------------------
+
+        stock = yf.Ticker(ticker, session=session)
         
+        # Historique 6 mois
+        hist = stock.history(period="6mo")
+        
+        # Double vérification si vide (parfois Yahoo renvoie vide sans erreur)
+        if hist.empty:
+            return None
+        
+        # Tendance 6 mois
         price_6m_ago = hist['Close'].iloc[0]
         price_today = hist['Close'].iloc[-1]
         trend_6m = ((price_today - price_6m_ago) / price_6m_ago) * 100
         
         info = stock.info
         
-        # Données
-        data = {
+        # Si info est vide ou ne contient pas 'regularMarketPrice', c'est louche
+        # On continue quand même avec ce qu'on a, mais c'est un point de vigilance.
+        
+        return {
             'ticker': ticker,
             'history': hist,
             'trend_6m': trend_6m,
-            'current_price': price_today,
             'market_cap': info.get('marketCap', 0),
-            'trailing_pe': info.get('trailingPE', 0),
-            'beta': info.get('beta', 0),
-            'profit_margins': info.get('profitMargins', 0),
-            'revenue_growth': info.get('revenueGrowth', 0),
-            'total_debt': info.get('totalDebt', 0),
-            'free_cashflow': info.get('freeCashflow', 0),
-            'news': [n.get('title', 'N/A') for n in (stock.news[:3] if hasattr(stock, 'news') and stock.news else [])]
+            'trailing_pe': info.get('trailingPE', None),
+            'beta': info.get('beta', None),
+            'profit_margins': info.get('profitMargins', None),
+            'revenue_growth': info.get('revenueGrowth', None),
+            'total_debt': info.get('totalDebt', None),
+            'free_cashflow': info.get('freeCashflow', None),
+            'news': [n.get('title', 'N/A') for n in (stock.news[:3] if hasattr(stock, 'news') and stock.news else [])],
+            'current_price': price_today
         }
-        return data
     
     except Exception as e:
+        # Affiche l'erreur réelle dans les logs du serveur (optionnel mais utile)
+        print(f"Erreur Yahoo: {str(e)}")
         return None
 
 # ============================================================================
