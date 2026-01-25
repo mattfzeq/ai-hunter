@@ -6,3 +6,5 @@ numpy
 python-dotenv
 requests
 plotly
+beautifulsoup4
+fake-useragent
